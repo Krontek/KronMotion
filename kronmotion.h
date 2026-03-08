@@ -19,6 +19,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#define __int8_t_defined
 
 /*===========================================================================
  * ENUMERATIONS
