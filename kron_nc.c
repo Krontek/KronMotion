@@ -163,7 +163,7 @@ static bool _nc_cia402_step(NC_AXIS *nc)
         /* Drive initializing — nothing to do, wait */
         slot->control_word = CIA402_CW_DISABLE;
     } else if (_cia402_ready_to_so(sw)) {
-        slot->control_word = CIA402_CW_SO;     /* Shutdown (→ Ready to switch on) */
+        slot->control_word = CIA402_CW_EOA;    /* Switch on → Switched on */
     } else if (_cia402_switched_on(sw)) {
         slot->control_word = CIA402_CW_OE;     /* Enable operation */
     } else if (op_en) {
