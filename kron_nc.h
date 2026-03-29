@@ -26,7 +26,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
-#include "../KronHAL/kron_pi.h"
+#include "kron_pi.h"
 #include "kronmotion.h"
 
 /*===========================================================================

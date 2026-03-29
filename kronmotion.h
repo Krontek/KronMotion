@@ -23,7 +23,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "../KronHAL/kron_pi.h"   /* KRON_SERVO_SLOT*, NC_CMD_TYPE, atomic macros */
+#include "kron_pi.h"              /* KRON_SERVO_SLOT*, NC_CMD_TYPE, atomic macros */
 
 /*===========================================================================
  * ENUMERATIONS
