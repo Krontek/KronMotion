@@ -55,7 +55,8 @@ void AXIS_REF_Init(AXIS_REF *axis, uint16_t axisNo, KRON_SERVO_SLOT *slot)
  *===========================================================================*/
 void MC_Power_Call(MC_Power *inst, AXIS_REF *axis)
 {
-    _AXIS_SAFE(axis, inst);
+    /* MC_Power has no Busy field — check axis pointer manually */
+    if (!axis) { inst->Error = true; inst->ErrorID = _MC_ERR_PARAM; return; }
 
     bool rising  = inst->Enable  && !inst->_prevEnable;
     bool falling = !inst->Enable &&  inst->_prevEnable;
@@ -138,7 +139,6 @@ void MC_Home_Call(MC_Home *inst, AXIS_REF *axis)
         inst->Done   = true;
         inst->Busy   = false;
         inst->Active = false;
-        inst->IsHomed = axis->IsHomed;
         return;
     }
     if (axis->sts_Error) {
@@ -629,7 +629,6 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
         inst->Busy           = true;
         inst->Active         = false;
         inst->InVelocity     = false;
-        inst->Done           = false;
         inst->Error          = false;
         inst->CommandAborted = false;
         return;
@@ -703,7 +702,6 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
         inst->Busy           = true;
         inst->Active         = false;
         inst->InEndVelocity  = false;
-        inst->Done           = false;
         inst->Error          = false;
         inst->CommandAborted = false;
         return;
@@ -765,7 +763,7 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
                           inst->_targetPosition, inst->Velocity,
                           inst->Acceleration, inst->Deceleration);
         inst->Busy = true; inst->Active = false; inst->InEndVelocity = false;
-        inst->Done = false; inst->Error = false; inst->CommandAborted = false;
+        inst->Error = false; inst->CommandAborted = false;
         return;
     }
 
