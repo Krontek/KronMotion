@@ -285,7 +285,7 @@ static void _nc_write_pi(NC_AXIS *nc)
     KRON_SERVO_SLOT *slot = nc->ref->slot;
     if (!slot || !slot->present) return;
 
-    float cpu = nc->ref->counts_per_unit > 0.0f ? nc->ref->counts_per_unit : 1.0f;
+    float cpu = slot->counts_per_unit > 0.0f ? slot->counts_per_unit : 1.0f;
     slot->target_pos_raw = (int32_t)(nc->priv.cmd_pos * cpu);
     slot->target_vel_raw = (int32_t)(nc->priv.cmd_vel * slot->vel_raw_per_unit);
     /* control_word already set by _nc_cia402_step */
