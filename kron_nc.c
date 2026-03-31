@@ -139,6 +139,9 @@ static bool _nc_cia402_step(NC_AXIS *nc)
 
     nc->priv.op_enabled = op_en;
 
+    /* Mirror raw PDO words into AXIS_REF for monitoring */
+    ref->drv_StatusWord  = sw;
+
     if (fault) {
         /* Attempt fault reset once */
         slot->control_word = CIA402_CW_FACK;
@@ -174,6 +177,7 @@ static bool _nc_cia402_step(NC_AXIS *nc)
         slot->control_word = CIA402_CW_SO;
     }
 
+    ref->drv_ControlWord = slot->control_word;
     return op_en;
 }
 

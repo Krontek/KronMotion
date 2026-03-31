@@ -144,6 +144,11 @@ typedef struct {
     bool              sts_CommandAborted;
     uint16_t          sts_ErrorID;
 
+    /* ── Drive diagnostics (written by NC each fast cycle, read-only) ──────── */
+    /* Raw CiA402 statusword / controlword from the servo drive's PDO.          */
+    uint16_t          drv_StatusWord;   /* 0x6041 — last received from drive  */
+    uint16_t          drv_ControlWord;  /* 0x6040 — last sent to drive        */
+
     /* ── Slow-Task-only: abort coordination between concurrent FBs ───────── */
     /* When a new FB takes control it increments _ActiveToken.               */
     /* Each FB stores its own token at Execute↑ in _myToken (FB-private).   */
