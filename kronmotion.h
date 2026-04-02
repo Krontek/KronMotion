@@ -123,6 +123,7 @@ typedef struct {
     float             cmd_TargetVel;    /* Maximum velocity [u/s]              */
     float             cmd_Accel;        /* Acceleration [u/s^2]                */
     float             cmd_Decel;        /* Deceleration [u/s^2]                */
+    float             cmd_Jerk;         /* Jerk [u/s^3], 0 = trapezoidal      */
     float             cmd_HomePos;      /* Position set at home signal         */
 
     /* ─────────────────────────────────────────────────────────────────────
@@ -165,13 +166,14 @@ void AXIS_REF_Init(AXIS_REF *axis, uint16_t axisNo, KRON_SERVO_SLOT *slot);
 /* Inline used by FBs: publish a new command to the NC engine */
 static inline void _axis_publish_cmd(AXIS_REF *axis, NC_CMD_TYPE cmd,
                                      float tgt, float vel,
-                                     float acc, float dec)
+                                     float acc, float dec, float jerk)
 {
     axis->cmd_Cmd       = cmd;
     axis->cmd_TargetPos = tgt;
     axis->cmd_TargetVel = vel * axis->VelFactor;
     axis->cmd_Accel     = acc * axis->AccFactor;
     axis->cmd_Decel     = dec * axis->AccFactor;
+    axis->cmd_Jerk      = jerk * axis->JerkFactor;
     KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);   /* RELEASE barrier — publish */
 }
 

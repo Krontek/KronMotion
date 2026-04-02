@@ -107,6 +107,7 @@ static bool _nc_latch_cmd(NC_AXIS *nc)
     nc->priv.v_max       = ref->cmd_TargetVel;
     nc->priv.acc         = ref->cmd_Accel;
     nc->priv.dec         = ref->cmd_Decel;
+    nc->priv.jerk        = ref->cmd_Jerk;
     nc->priv.in_velocity = false;
 
     /* Acknowledge: NC has latched the command */
@@ -182,10 +183,237 @@ static bool _nc_cia402_step(NC_AXIS *nc)
 }
 
 /*===========================================================================
- * _nc_profile_pos — trapezoidal position profile, one step.
+ * S-CURVE (JERK-LIMITED) MOTION PROFILE GENERATOR
  *
- * Moves cmd_pos toward target at v_max with acc/dec ramps.
- * Returns true when at target and velocity is zero.
+ * Triple integration:  jerk → acceleration → velocity → position
+ *
+ * When jerk > 0:  Full 7-phase S-curve with smooth acceleration ramps.
+ * When jerk = 0:  Falls back to trapezoidal profile (instant acc changes).
+ *
+ * The online (cycle-by-cycle) approach evaluates the stopping distance
+ * including the current acceleration ramp-down each cycle, so it handles
+ * ContinuousUpdate, on-the-fly velocity changes, and preemption naturally.
+ *
+ * Stopping distance with jerk:
+ *   Phase A: ramp current acceleration to zero → d_A = |v|·t_A + ½·a·t_A²
+ *            where t_A = |a| / j
+ *   Phase B: jerk-limited deceleration from v_after_A to zero
+ *            d_B ≈ v² / (2·dec)  for trapezoidal component
+ *            + v·a/(2·j)         for S-curve ramp-in/out overhead
+ *   Total is computed by _nc_stopping_distance() below.
+ *===========================================================================*/
+
+/* Forward declaration — defined below */
+static float _nc_fsqrt(float x);
+
+/*---------------------------------------------------------------------------
+ * _nc_stopping_distance — compute distance needed to stop from current state
+ *
+ * Given (abs_vel, abs_acc, dec, jerk), returns how far we travel if we
+ * start braking NOW and come to a complete stop.
+ *
+ * Two cases:
+ *   jerk > 0: S-curve stop (ramp acc to 0, then jerk-limited decel)
+ *   jerk = 0: Trapezoidal stop = v² / (2·dec)
+ *---------------------------------------------------------------------------*/
+static float _nc_stopping_distance(float abs_vel, float abs_acc,
+                                   float dec, float jerk)
+{
+    if (abs_vel < _NC_VEL_EPS) return 0.0f;
+
+    if (jerk <= 0.0f) {
+        /* Trapezoidal: d = v² / (2·dec) */
+        return (abs_vel * abs_vel) / (2.0f * dec + 1e-9f);
+    }
+
+    float d = 0.0f;
+    float v = abs_vel;
+    float a = abs_acc;   /* current acceleration in direction of motion */
+
+    /* Phase A: if currently accelerating (a > 0), must ramp a down to 0
+     * before we can start decelerating. During this time velocity increases. */
+    if (a > 0.0f) {
+        float t_a = a / jerk;              /* time to ramp acc to zero     */
+        float v_gain = a * t_a * 0.5f;     /* ½·a·t (area under ramp)     */
+        d += v * t_a + v_gain * t_a / 3.0f;/* distance during ramp-down   */
+        v += v_gain;                        /* velocity after ramp-down    */
+        a = 0.0f;
+    }
+
+    /* Phase B: from (v, a=0) do a full S-curve decel to zero.
+     *
+     * S-curve decel has 3 sub-phases:
+     *   B1: jerk-  → acceleration grows (negative) until |a| = dec
+     *       t1 = dec / jerk
+     *       Δv1 = ½ · dec · t1 = dec²/(2·j)
+     *       Δd1 = v·t1 - dec²·t1/(6·j) ... simplified below
+     *
+     *   B2: constant decel at -dec until velocity is low enough for B3
+     *       Δv2 = v - Δv1 - Δv3 (remainder)
+     *       Δd2 = (average velocity) · t2
+     *
+     *   B3: jerk+  → acceleration ramps from -dec back to 0
+     *       t3 = dec / jerk = t1
+     *       Δv3 = ½ · dec · t3 = dec²/(2·j)  (same as Δv1)
+     *       Δd3 = Δv3·t3/3 (velocity during final ramp)
+     *
+     * If v is so small that Δv1 + Δv3 > v, we never reach full dec
+     * and do a direct jerk-only stop (triangular decel profile). */
+
+    float dv_ramp = (dec * dec) / (2.0f * jerk);  /* velocity consumed by one ramp */
+    float dv_both = 2.0f * dv_ramp;                /* both ramps combined           */
+
+    if (v <= dv_both + _NC_VEL_EPS) {
+        /* Triangular decel: never reach full dec.
+         * Peak decel a_peak = sqrt(v · j).
+         * Total time t_total ≈ 2 · sqrt(v / j).
+         * Distance ≈ (2/3) · v · t_total.  Simplified: */
+        float a_peak = _nc_fsqrt(v * jerk);
+        if (a_peak < 1e-6f) return d;
+        float t_half = a_peak / jerk;
+        /* Each half: d = v_in · t ± j·t³/6 integrated.
+         * Approximate: total ≈ v · 2·t_half · 2/3 */
+        d += v * t_half * 1.333333f;
+    } else {
+        /* Full 3-sub-phase decel */
+        float t_ramp = dec / jerk;
+
+        /* B1: ramp-in (jerk-) */
+        d += v * t_ramp - dv_ramp * t_ramp / 3.0f;
+        v -= dv_ramp;
+
+        /* B3: ramp-out (jerk+), computed first to find B2 velocity span */
+        float d_b3 = dv_ramp * t_ramp / 3.0f;
+        float v_b3_entry = dv_ramp;  /* velocity when B3 starts */
+
+        /* B2: constant decel */
+        float v_b2 = v - v_b3_entry;  /* velocity consumed at constant dec */
+        if (v_b2 > 0.0f) {
+            float t_b2 = v_b2 / dec;
+            d += (v - v_b2 * 0.5f) * t_b2;  /* average vel × time */
+            v = v_b3_entry;
+        }
+
+        /* B3: ramp-out */
+        d += d_b3;
+    }
+
+    return d;
+}
+
+/*---------------------------------------------------------------------------
+ * _nc_fsqrt — fast square root without libm
+ *
+ * Uses one step of Newton-Raphson after a bit-hack initial estimate.
+ * Good to ~0.1% accuracy — sufficient for jerk planning.
+ *---------------------------------------------------------------------------*/
+static float _nc_fsqrt(float x)
+{
+    if (x <= 0.0f) return 0.0f;
+    /* Quake-style initial estimate */
+    union { float f; uint32_t i; } u = { .f = x };
+    u.i = 0x5f3759df - (u.i >> 1);     /* inverse sqrt estimate */
+    float inv = u.f;
+    inv = inv * (1.5f - 0.5f * x * inv * inv);  /* one Newton step */
+    return x * inv;                     /* x · (1/√x) = √x */
+}
+
+/*===========================================================================
+ * _nc_profile_vel — Jerk-limited velocity ramp, one step.
+ *
+ * Ramps cmd_vel toward target_vel using S-curve acceleration.
+ * When jerk=0, falls back to trapezoidal (instant acceleration change).
+ *
+ * Updates: cmd_acc, cmd_vel, cmd_pos.
+ * Returns true when target velocity has been reached (within tolerance).
+ *===========================================================================*/
+static bool _nc_profile_vel(NC_AXIS_INTERNAL *p, float dt)
+{
+    float diff = p->target_vel - p->cmd_vel;
+
+    /* Arrived at target velocity? */
+    if (_NC_FABS(diff) < _NC_VEL_EPS && _NC_FABS(p->cmd_acc) < _NC_VEL_EPS) {
+        p->cmd_vel = p->target_vel;
+        p->cmd_acc = 0.0f;
+        p->cmd_pos += p->cmd_vel * dt;
+        return true;
+    }
+
+    float dir = (diff >= 0.0f) ? 1.0f : -1.0f;  /* +1 = speed up, -1 = slow down */
+    float abs_diff = _NC_FABS(diff);
+    float j = p->jerk;
+
+    if (j <= 0.0f) {
+        /*--- Trapezoidal fallback: instant acceleration changes ---*/
+        float limit = (dir > 0.0f) ? p->acc : p->dec;
+        float new_vel = p->cmd_vel + dir * limit * dt;
+        /* Overshoot clamp */
+        if ((dir > 0.0f && new_vel > p->target_vel) ||
+            (dir < 0.0f && new_vel < p->target_vel))
+            new_vel = p->target_vel;
+        p->cmd_acc = (new_vel - p->cmd_vel) / (dt + 1e-12f);
+        p->cmd_vel = new_vel;
+        p->cmd_pos += p->cmd_vel * dt;
+        return _NC_FABS(p->target_vel - p->cmd_vel) < _NC_VEL_EPS;
+    }
+
+    /*--- S-curve: jerk-limited acceleration ramp ---*/
+    float acc = p->cmd_acc;
+    float acc_limit = (dir > 0.0f) ? p->acc : p->dec;
+
+    /* Distance (in velocity space) to decelerate current acc to zero:
+     * dv_ramp_down = a²/(2·j) */
+    float dv_ramp_down = (acc * dir > 0.0f)
+        ? (acc * acc) / (2.0f * j)
+        : 0.0f;
+
+    float new_acc;
+    if (abs_diff <= dv_ramp_down + _NC_VEL_EPS) {
+        /* Must start reducing acceleration to arrive at target vel smoothly */
+        new_acc = acc - dir * j * dt;
+    } else {
+        /* Can still increase acceleration toward acc_limit */
+        new_acc = acc + dir * j * dt;
+    }
+
+    /* Clamp acceleration magnitude */
+    float clamped_acc = _NC_CLAMP(new_acc, -acc_limit, acc_limit);
+
+    /* If clamping changed direction of jerk, we were overshooting acc limit */
+    new_acc = clamped_acc;
+
+    /* Integrate: acc → vel */
+    float new_vel = p->cmd_vel + new_acc * dt;
+
+    /* Velocity overshoot clamp */
+    if ((dir > 0.0f && new_vel > p->target_vel) ||
+        (dir < 0.0f && new_vel < p->target_vel)) {
+        new_vel = p->target_vel;
+        new_acc = 0.0f;
+    }
+
+    /* Integrate: vel → pos */
+    p->cmd_pos += 0.5f * (p->cmd_vel + new_vel) * dt;  /* trapezoidal integration */
+    p->cmd_vel = new_vel;
+    p->cmd_acc = new_acc;
+
+    return false;
+}
+
+/*===========================================================================
+ * _nc_profile_pos — Jerk-limited position profile, one step.
+ *
+ * Moves cmd_pos toward target_pos with S-curve acceleration/deceleration.
+ * Acceleration is smoothly ramped by jerk (when jerk > 0).
+ *
+ * Algorithm:
+ *   1. Compute stopping distance from current (vel, acc) state.
+ *   2. If remaining distance <= stopping distance → decelerate (reverse jerk).
+ *   3. Else → accelerate toward v_max (apply jerk toward acc limit).
+ *   4. Near target, snap to exact position.
+ *
+ * Updates: cmd_acc, cmd_vel, cmd_pos.
+ * Returns true when at target position with zero velocity.
  *===========================================================================*/
 static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
 {
@@ -193,92 +421,223 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
     float dir = (remaining >= 0.0f) ? 1.0f : -1.0f;
     float abs_rem = _NC_FABS(remaining);
 
-    /* Project current velocity onto direction of motion */
-    float abs_vel = p->cmd_vel * dir;
-    if (abs_vel < 0.0f) abs_vel = 0.0f;  /* wrong-direction clamp */
+    /* Current velocity and acceleration projected onto direction of travel */
+    float vel = p->cmd_vel * dir;    /* positive = toward target */
+    float acc = p->cmd_acc * dir;    /* positive = accelerating toward target */
 
-    /* Arrival */
-    if (abs_rem < _NC_POS_EPS && abs_vel < _NC_VEL_EPS) {
-        p->cmd_vel = 0.0f;
+    /* ── Arrival check ─────────────────────────────────────────────────── */
+    if (abs_rem < _NC_POS_EPS && _NC_FABS(vel) < _NC_VEL_EPS) {
         p->cmd_pos = p->target_pos;
+        p->cmd_vel = 0.0f;
+        p->cmd_acc = 0.0f;
         return true;
     }
 
-    /* Braking distance: d = v² / (2·dec) */
-    float brake_dist = (abs_vel * abs_vel) / (2.0f * p->dec + 1e-9f);
-    float new_abs_vel;
+    float j = p->jerk;
 
-    if (brake_dist >= abs_rem) {
-        /* Decelerate */
-        new_abs_vel = abs_vel - p->dec * dt;
-        if (new_abs_vel < 0.0f) new_abs_vel = 0.0f;
-    } else {
-        /* Accelerate or hold */
-        new_abs_vel = abs_vel + p->acc * dt;
-        if (new_abs_vel > p->v_max) new_abs_vel = p->v_max;
+    if (j <= 0.0f) {
+        /*--- Trapezoidal fallback ---*/
+        float abs_vel = _NC_FMAX(vel, 0.0f);
+        float brake_dist = (abs_vel * abs_vel) / (2.0f * p->dec + 1e-9f);
+        float new_abs_vel;
+
+        if (brake_dist >= abs_rem) {
+            new_abs_vel = abs_vel - p->dec * dt;
+            if (new_abs_vel < 0.0f) new_abs_vel = 0.0f;
+        } else {
+            new_abs_vel = abs_vel + p->acc * dt;
+            if (new_abs_vel > p->v_max) new_abs_vel = p->v_max;
+        }
+
+        float nv = new_abs_vel * dir;
+        float np = p->cmd_pos + 0.5f * (p->cmd_vel + nv) * dt;
+
+        /* Overshoot clamp */
+        if (dir > 0.0f && np > p->target_pos) { np = p->target_pos; nv = 0.0f; }
+        if (dir < 0.0f && np < p->target_pos) { np = p->target_pos; nv = 0.0f; }
+
+        p->cmd_acc = (nv - p->cmd_vel) / (dt + 1e-12f);
+        p->cmd_vel = nv;
+        p->cmd_pos = np;
+        return false;
     }
 
-    float new_vel = new_abs_vel * dir;
-    float new_pos = p->cmd_pos + new_vel * dt;
+    /*--- S-curve position mode ---*/
 
-    /* Don't overshoot */
-    if (dir > 0.0f && new_pos > p->target_pos) { new_pos = p->target_pos; new_vel = 0.0f; }
-    if (dir < 0.0f && new_pos < p->target_pos) { new_pos = p->target_pos; new_vel = 0.0f; }
+    /* Handle wrong-direction velocity: must decelerate first */
+    if (vel < -_NC_VEL_EPS) {
+        /* Velocity is away from target — apply jerk toward target */
+        float new_acc = acc + j * dt;
+        if (new_acc > p->dec) new_acc = p->dec;
+        float nv = (vel + new_acc * dt) * dir;
+        p->cmd_pos += 0.5f * (p->cmd_vel + nv) * dt;
+        p->cmd_vel = nv;
+        p->cmd_acc = new_acc * dir;
+        return false;
+    }
 
+    /* Positive velocity toward target (or zero) */
+    float abs_vel = _NC_FMAX(vel, 0.0f);
+
+    /* Compute stopping distance from current state */
+    float stop_dist = _nc_stopping_distance(abs_vel, _NC_FMAX(acc, 0.0f),
+                                            p->dec, j);
+
+    float new_acc_dir;  /* acceleration in direction of motion */
+
+    if (stop_dist >= abs_rem - _NC_POS_EPS) {
+        /*--- DECELERATION ZONE ---
+         * Need to slow down. Three sub-decisions:
+         * 1. If acc > 0: first ramp acc down to 0 (apply negative jerk)
+         * 2. If acc ≈ 0: apply negative jerk to build deceleration
+         * 3. If acc < 0: continue decelerating, ramp toward zero at end */
+
+        if (acc > _NC_VEL_EPS) {
+            /* Still accelerating — ramp down */
+            new_acc_dir = acc - j * dt;
+            if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+        } else {
+            /* Build deceleration (negative acc in travel direction) */
+            new_acc_dir = acc - j * dt;
+            if (new_acc_dir < -p->dec) new_acc_dir = -p->dec;
+
+            /* As velocity approaches zero, ramp acc back up to avoid overshoot.
+             * Use distance to decide: if remaining < acc²/(2j), start ramp-out */
+            float abs_a = _NC_FABS(new_acc_dir);
+            float ramp_out_dist = abs_vel * (abs_a / j)
+                                + (abs_a * abs_a * abs_a) / (6.0f * j * j);
+            if (abs_rem < ramp_out_dist || abs_vel < abs_a * dt * 2.0f) {
+                new_acc_dir = acc + j * dt;
+                if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
+            }
+        }
+    } else {
+        /*--- ACCELERATION / CRUISE ZONE ---*/
+        if (abs_vel >= p->v_max - _NC_VEL_EPS) {
+            /* At cruise speed — ramp acceleration to zero */
+            if (acc > _NC_VEL_EPS) {
+                new_acc_dir = acc - j * dt;
+                if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+            } else {
+                new_acc_dir = 0.0f;
+            }
+        } else {
+            /* Accelerating toward v_max */
+            new_acc_dir = acc + j * dt;
+            if (new_acc_dir > p->acc) new_acc_dir = p->acc;
+
+            /* Don't overshoot v_max — check if we need to ramp down acc */
+            float vel_headroom = p->v_max - abs_vel;
+            float dv_ramp_down = (new_acc_dir * new_acc_dir) / (2.0f * j);
+            if (vel_headroom <= dv_ramp_down + _NC_VEL_EPS) {
+                new_acc_dir = acc - j * dt;
+                if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+            }
+        }
+    }
+
+    /* ── Integrate state ──────────────────────────────────────────────── */
+    float real_acc = new_acc_dir * dir;           /* back to world frame */
+    float new_vel = p->cmd_vel + real_acc * dt;
+
+    /* Velocity magnitude clamp (never exceed v_max) */
+    float abs_new_vel = _NC_FABS(new_vel);
+    if (abs_new_vel > p->v_max) {
+        new_vel = _NC_SIGN(new_vel) * p->v_max;
+    }
+
+    /* Ensure velocity doesn't reverse past zero while decelerating */
+    if (vel >= 0.0f && new_vel * dir < -_NC_VEL_EPS) {
+        new_vel = 0.0f;
+        real_acc = 0.0f;
+    }
+
+    float new_pos = p->cmd_pos + 0.5f * (p->cmd_vel + new_vel) * dt;
+
+    /* Overshoot clamp */
+    if (dir > 0.0f && new_pos > p->target_pos) {
+        new_pos = p->target_pos; new_vel = 0.0f; real_acc = 0.0f;
+    }
+    if (dir < 0.0f && new_pos < p->target_pos) {
+        new_pos = p->target_pos; new_vel = 0.0f; real_acc = 0.0f;
+    }
+
+    p->cmd_acc = real_acc;
     p->cmd_vel = new_vel;
     p->cmd_pos = new_pos;
     return false;
 }
 
 /*===========================================================================
- * _nc_profile_vel — trapezoidal velocity ramp, one step.
+ * _nc_decel_to_zero — Jerk-limited deceleration to standstill, one step.
  *
- * Ramps cmd_vel toward target_vel.
- * Returns true when velocity has been reached.
- *===========================================================================*/
-static bool _nc_profile_vel(NC_AXIS_INTERNAL *p, float dt)
-{
-    float diff = p->target_vel - p->cmd_vel;
-    float new_vel;
-
-    if (_NC_FABS(diff) < _NC_VEL_EPS) {
-        new_vel = p->target_vel;
-        p->cmd_pos += new_vel * dt;
-        p->cmd_vel  = new_vel;
-        return true;
-    }
-
-    if (diff > 0.0f) {
-        new_vel = p->cmd_vel + p->acc * dt;
-        if (new_vel > p->target_vel) new_vel = p->target_vel;
-    } else {
-        new_vel = p->cmd_vel - p->dec * dt;
-        if (new_vel < p->target_vel) new_vel = p->target_vel;
-    }
-
-    p->cmd_pos += new_vel * dt;
-    p->cmd_vel  = new_vel;
-    return false;
-}
-
-/*===========================================================================
- * _nc_decel_to_zero — decelerate to standstill, one step.
+ * Used by MC_Halt / MC_Stop states (STOPPING).
+ * Brings velocity to zero smoothly when jerk > 0.
  *
  * Returns true when stopped.
  *===========================================================================*/
 static bool _nc_decel_to_zero(NC_AXIS_INTERNAL *p, float dt)
 {
-    if (_NC_FABS(p->cmd_vel) < _NC_VEL_EPS) {
+    float vel = p->cmd_vel;
+    float acc = p->cmd_acc;
+
+    /* Already stopped? */
+    if (_NC_FABS(vel) < _NC_VEL_EPS && _NC_FABS(acc) < _NC_VEL_EPS) {
         p->cmd_vel = 0.0f;
+        p->cmd_acc = 0.0f;
         return true;
     }
-    float dir = _NC_SIGN(p->cmd_vel);
-    float new_vel = p->cmd_vel - dir * p->dec * dt;
-    if (dir > 0.0f && new_vel < 0.0f) new_vel = 0.0f;
-    if (dir < 0.0f && new_vel > 0.0f) new_vel = 0.0f;
-    p->cmd_pos += new_vel * dt;
-    p->cmd_vel  = new_vel;
-    return _NC_FABS(new_vel) < _NC_VEL_EPS;
+
+    float j = p->jerk;
+
+    if (j <= 0.0f) {
+        /*--- Trapezoidal fallback ---*/
+        float sign = _NC_SIGN(vel);
+        float new_vel = vel - sign * p->dec * dt;
+        if (sign > 0.0f && new_vel < 0.0f) new_vel = 0.0f;
+        if (sign < 0.0f && new_vel > 0.0f) new_vel = 0.0f;
+        p->cmd_pos += 0.5f * (vel + new_vel) * dt;
+        p->cmd_acc = (new_vel - vel) / (dt + 1e-12f);
+        p->cmd_vel = new_vel;
+        return _NC_FABS(new_vel) < _NC_VEL_EPS;
+    }
+
+    /*--- S-curve deceleration ---*/
+    float sign = _NC_SIGN(vel);
+    float abs_vel = _NC_FABS(vel);
+    float a_toward_zero = -acc * sign;  /* positive when decelerating correctly */
+
+    /* Distance/velocity to ramp current decel back to zero:
+     * dv = a²/(2·j) */
+    float dv_ramp_out = (a_toward_zero > 0.0f)
+        ? (a_toward_zero * a_toward_zero) / (2.0f * j)
+        : 0.0f;
+
+    float new_acc;
+    if (abs_vel <= dv_ramp_out + _NC_VEL_EPS * 2.0f) {
+        /* Close to stop — ramp acceleration back toward zero */
+        new_acc = acc + sign * j * dt;
+        /* Don't let acc overshoot zero */
+        if (sign > 0.0f && new_acc > 0.0f) new_acc = 0.0f;
+        if (sign < 0.0f && new_acc < 0.0f) new_acc = 0.0f;
+    } else {
+        /* Build deceleration (increase |acc| opposing velocity) */
+        new_acc = acc - sign * j * dt;
+        /* Clamp magnitude to dec limit */
+        if (_NC_FABS(new_acc) > p->dec) new_acc = -sign * p->dec;
+    }
+
+    float new_vel = vel + new_acc * dt;
+
+    /* Don't reverse through zero */
+    if (sign > 0.0f && new_vel < 0.0f) { new_vel = 0.0f; new_acc = 0.0f; }
+    if (sign < 0.0f && new_vel > 0.0f) { new_vel = 0.0f; new_acc = 0.0f; }
+
+    p->cmd_pos += 0.5f * (vel + new_vel) * dt;
+    p->cmd_vel = new_vel;
+    p->cmd_acc = new_acc;
+
+    return _NC_FABS(new_vel) < _NC_VEL_EPS && _NC_FABS(new_acc) < _NC_VEL_EPS;
 }
 
 /*===========================================================================
@@ -347,6 +706,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
                 ref->sts_Done      = false;
                 ref->sts_Error     = false;
                 p->cmd_vel         = 0.0f;
+                p->cmd_acc         = 0.0f;
                 break;
 
             case NC_CMD_MOVE_ABS:
@@ -380,6 +740,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
                 ref->sts_Done   = false;
                 ref->sts_Error  = false;
                 p->cmd_vel      = ref->ActualVelocity; /* decel from actual */
+                p->cmd_acc      = 0.0f;                /* fresh decel start */
                 break;
 
             case NC_CMD_HOME:
@@ -411,6 +772,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
     if (ref->sts_State == MC_AXIS_DISABLED && op_en) {
         p->cmd_pos         = ref->ActualPosition;
         p->cmd_vel         = 0.0f;
+        p->cmd_acc         = 0.0f;
         ref->sts_State     = MC_AXIS_STANDSTILL;
         ref->sts_Busy      = false;
         ref->sts_Done      = false;
@@ -423,6 +785,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
         case MC_AXIS_DISABLED:
             /* Hold still */
             p->cmd_vel = 0.0f;
+            p->cmd_acc = 0.0f;
             ref->sts_Busy = false;
             break;
 
@@ -448,15 +811,8 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
         }
 
         case MC_AXIS_STOPPING: {
-            float dec = (p->dec > _NC_VEL_EPS) ? p->dec : 1000.0f;
-            bool stopped;
-            {
-                NC_AXIS_INTERNAL tmp = *p;
-                tmp.dec = dec;
-                stopped = _nc_decel_to_zero(&tmp, dt);
-                p->cmd_pos = tmp.cmd_pos;
-                p->cmd_vel = tmp.cmd_vel;
-            }
+            if (p->dec < _NC_VEL_EPS) p->dec = 1000.0f;  /* safety default */
+            bool stopped = _nc_decel_to_zero(p, dt);
             ref->sts_Busy = !stopped;
             if (stopped) {
                 ref->sts_Done  = true;
@@ -471,6 +827,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
              * mark axis as homed.  Hardware homing sequences can extend this. */
             p->cmd_pos        = ref->cmd_HomePos;
             p->cmd_vel        = 0.0f;
+            p->cmd_acc        = 0.0f;
             ref->IsHomed      = true;
             ref->sts_Done     = true;
             ref->sts_Busy     = false;
@@ -480,6 +837,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
 
         case MC_AXIS_ERRORSTOP:
             p->cmd_vel = 0.0f;
+            p->cmd_acc = 0.0f;
             ref->sts_Busy = false;
             break;
 

@@ -168,6 +168,7 @@ void MC_Stop_Call(MC_Stop *inst, AXIS_REF *axis)
         }
         axis->cmd_Cmd   = NC_CMD_STOP;
         axis->cmd_Decel = inst->Deceleration;
+        axis->cmd_Jerk  = inst->Jerk;
         KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);
         inst->Busy  = true;
         inst->Done  = false;
@@ -215,6 +216,7 @@ void MC_Halt_Call(MC_Halt *inst, AXIS_REF *axis)
         inst->_myToken = _axis_take_token(axis);
         axis->cmd_Cmd   = NC_CMD_HALT;
         axis->cmd_Decel = inst->Deceleration;
+        axis->cmd_Jerk  = inst->Jerk;
         KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);
         inst->Busy           = true;
         inst->Active         = false;
@@ -283,7 +285,7 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                           inst->Position, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
         inst->Busy           = true;
         inst->Active         = false;
         inst->Done           = false;
@@ -296,7 +298,7 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
         _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                           inst->Position, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
     }
 
     if (!inst->Busy) return;
@@ -356,7 +358,7 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
                           inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
         inst->Busy           = true;
         inst->Active         = false;
         inst->Done           = false;
@@ -368,7 +370,7 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
         _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
                           inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
     }
 
     if (!inst->Busy) return;
@@ -428,7 +430,7 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
         /* NC_CMD_MOVE_ADD: NC engine adds this on top of in-flight motion */
         _axis_publish_cmd(axis, NC_CMD_MOVE_ADD,
                           inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
         inst->Busy           = true;
         inst->Active         = false;
         inst->Done           = false;
@@ -440,7 +442,7 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
         _axis_publish_cmd(axis, NC_CMD_MOVE_ADD,
                           inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
     }
 
     if (!inst->Busy) return;
@@ -559,6 +561,7 @@ void MC_HaltSuperimposed_Call(MC_HaltSuperimposed *inst, AXIS_REF *axis)
         inst->_myToken = _axis_take_token(axis);
         axis->cmd_Cmd   = NC_CMD_HALT;
         axis->cmd_Decel = inst->Deceleration;
+        axis->cmd_Jerk  = inst->Jerk;
         KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);
         inst->Busy           = true;
         inst->Active         = false;
@@ -625,7 +628,7 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_VEL,
                           0.0f, vel,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
         inst->Busy           = true;
         inst->Active         = false;
         inst->InVelocity     = false;
@@ -639,7 +642,7 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
         if (inst->Direction == mcNegativeDirection) vel = -vel;
         _axis_publish_cmd(axis, NC_CMD_MOVE_VEL,
                           0.0f, vel,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
     }
 
     if (!inst->Busy) return;
@@ -698,7 +701,7 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                           inst->Position, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
         inst->Busy           = true;
         inst->Active         = false;
         inst->InEndVelocity  = false;
@@ -710,7 +713,7 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
         _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                           inst->Position, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
     }
 
     if (!inst->Busy) return;
@@ -761,7 +764,7 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
                           inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
         inst->Busy = true; inst->Active = false; inst->InEndVelocity = false;
         inst->Error = false; inst->CommandAborted = false;
         return;
@@ -770,7 +773,7 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
         _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
                           inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration);
+                          inst->Acceleration, inst->Deceleration, inst->Jerk);
     }
 
     if (!inst->Busy) return;

@@ -36,29 +36,31 @@
  * Embedded inside NC_AXIS (below).
  *===========================================================================*/
 typedef struct {
-    /* Profile generator state */
-    float   target_pos;         /* Absolute position goal [u]             */
+    /* ── Profile constraints (latched from command channel) ────────────── */
+    float   target_pos;         /* Absolute position goal [u]              */
     float   target_vel;         /* Target velocity (signed, vel mode) [u/s]*/
-    float   v_max;              /* Profile velocity limit [u/s]           */
-    float   acc;                /* Profile acceleration [u/s^2]           */
-    float   dec;                /* Profile deceleration [u/s^2]           */
+    float   v_max;              /* Profile velocity limit [u/s]            */
+    float   acc;                /* Max acceleration [u/s^2]                */
+    float   dec;                /* Max deceleration [u/s^2]                */
+    float   jerk;               /* Jerk limit [u/s^3], 0 = trapezoidal    */
 
-    /* Current integrator state (what the profile output is now) */
-    float   cmd_pos;            /* Current commanded position [u]         */
-    float   cmd_vel;            /* Current commanded velocity [u/s]       */
+    /* ── S-curve integrator state (triple integration: jerk→acc→vel→pos) */
+    float   cmd_pos;            /* Current commanded position [u]          */
+    float   cmd_vel;            /* Current commanded velocity [u/s]        */
+    float   cmd_acc;            /* Current commanded acceleration [u/s^2]  */
 
-    /* Latched command from Slow Task */
-    uint16_t    latched_seq;    /* cmd_Seq value when we latched the cmd  */
-    NC_CMD_TYPE latched_cmd;    /* Command type latched from AXIS_REF     */
+    /* ── Latched command from Slow Task ─────────────────────────────── */
+    uint16_t    latched_seq;    /* cmd_Seq value when we latched the cmd   */
+    NC_CMD_TYPE latched_cmd;    /* Command type latched from AXIS_REF      */
 
-    /* Velocity mode: set true when cmd_vel has reached target_vel */
-    bool    in_velocity;
+    /* ── Velocity mode flag ─────────────────────────────────────────── */
+    bool    in_velocity;        /* True when cmd_vel has reached target_vel */
 
-    /* CiA402 control state */
-    bool    power_requested;    /* MC_Power Enable = TRUE acknowledged     */
-    bool    op_enabled;         /* Drive is in Operation Enabled state     */
+    /* ── CiA402 control state ───────────────────────────────────────── */
+    bool    power_requested;    /* MC_Power Enable = TRUE acknowledged      */
+    bool    op_enabled;         /* Drive is in Operation Enabled state      */
 
-    /* Superimposed offset accumulator */
+    /* ── Superimposed offset accumulator ────────────────────────────── */
     float   superimposed_offset;
     float   superimposed_vel;
 
