@@ -1267,3 +1267,9 @@ void MC_Reset_Call(MC_Reset *inst, AXIS_REF *axis)
         inst->Busy = false;
     }
 }
+
+/*===========================================================================
+ * NC Engine — included here so the build system (single .c per library)
+ * compiles it into libkronmotion.a alongside the PLCopen FBs.
+ *===========================================================================*/
+#include "kron_nc.c"
