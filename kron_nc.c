@@ -161,6 +161,10 @@ static bool _nc_cia402_step(NC_AXIS *nc)
         return false;
     }
 
+    /* Set mode of operation EARLY — many drives require this before enabling.
+     * CSP (Cyclic Synchronous Position) is the default for NC-style control. */
+    slot->mode_of_operation = CIA402_MODE_CSP;
+
     /* Step through CiA402 sequence: Not Ready → Switch-on Disabled
      * → Ready to Switch On → Switched On → Operation Enabled             */
     if (_cia402_not_ready(sw)) {
@@ -172,7 +176,6 @@ static bool _nc_cia402_step(NC_AXIS *nc)
         slot->control_word = CIA402_CW_OE;     /* Enable operation */
     } else if (op_en) {
         slot->control_word = CIA402_CW_OE;     /* Keep enabled */
-        slot->mode_of_operation = CIA402_MODE_CSP;
     } else {
         /* Switch-on disabled or other intermediate — send Shutdown */
         slot->control_word = CIA402_CW_SO;
