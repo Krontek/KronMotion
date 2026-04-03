@@ -44,7 +44,6 @@ void AXIS_REF_Init(AXIS_REF *axis, uint16_t axisNo, KRON_SERVO_SLOT *slot)
     axis->AccFactor   = 1.0f;
     axis->JerkFactor  = 1.0f;
     axis->GearRatio   = 1.0f;
-    axis->UnitsPerRev = 1.0f;
     /* sts_State starts at MC_AXIS_DISABLED (0) — already done by memset */
 }
 

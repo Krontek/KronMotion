@@ -84,7 +84,7 @@ typedef enum {
 typedef struct {
     /* ── Inputs: written by HAL driver (fieldbus → image) ── */
     int32_t  actual_pos_raw;       /* Encoder counts (position actual value)    */
-    int32_t  actual_vel_raw;       /* Velocity actual value (counts/s or 0.1rpm)*/
+    int32_t  actual_vel_raw;       /* Velocity actual value (counts/s)          */
     int16_t  actual_torque_raw;    /* Torque actual value (per-mille of rated)  */
     int16_t  following_error_raw;  /* Following error (counts)                  */
     uint16_t status_word;          /* CiA402 statusword (object 0x6041)         */
@@ -93,6 +93,7 @@ typedef struct {
     /* ── Outputs: written by NC Engine (image → fieldbus via HAL) ── */
     int32_t  target_pos_raw;       /* Target position (counts) (0x607A)         */
     int32_t  target_vel_raw;       /* Target velocity (counts/s) (0x60FF)       */
+    /* Note: vel_raw_per_unit = counts_per_unit (both in counts/s per u/s)     */
     int16_t  target_torque_raw;    /* Target torque (per-mille) (0x6071)        */
     uint16_t control_word;         /* CiA402 controlword (0x6040)               */
     uint8_t  mode_of_operation;    /* Modes of operation (0x6060)               */

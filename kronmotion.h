@@ -105,8 +105,7 @@ typedef struct {
 
     /* ── Axis scaling metadata (configured at startup, informational) ───── */
     float             EncoderResolution; /* Encoder counts per motor rev      */
-    float             GearRatio;         /* Motor revs per load rev           */
-    float             UnitsPerRev;       /* User units per load rev           */
+    float             GearRatio;         /* User units per motor rev (e.g. 5 = 1 rev → 5 mm) */
 
     /* ── Axis-level status (written by NC) ──────────────────────────────── */
     bool              IsHomed;
