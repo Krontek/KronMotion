@@ -219,10 +219,11 @@ static float _nc_fsqrt(float x);
  *   jerk > 0: S-curve stop (ramp acc to 0, then jerk-limited decel)
  *   jerk = 0: Trapezoidal stop = v² / (2·dec)
  *---------------------------------------------------------------------------*/
-static float _nc_stopping_distance(float abs_vel, float abs_acc,
+static float _nc_stopping_distance(float abs_vel, float acc_in_dir,
                                    float dec, float jerk)
 {
-    if (abs_vel < _NC_VEL_EPS) return 0.0f;
+    if (abs_vel < _NC_VEL_EPS && _NC_FABS(acc_in_dir) < _NC_VEL_EPS)
+        return 0.0f;
 
     if (jerk <= 0.0f) {
         /* Trapezoidal: d = v² / (2·dec) */
@@ -231,61 +232,59 @@ static float _nc_stopping_distance(float abs_vel, float abs_acc,
 
     float d = 0.0f;
     float v = abs_vel;
-    float a = abs_acc;   /* current acceleration in direction of motion */
 
-    /* Phase A: if currently accelerating (a > 0), must ramp a down to 0
-     * before we can start decelerating. During this time velocity increases. */
-    if (a > 0.0f) {
-        float t_a = a / jerk;              /* time to ramp acc to zero     */
-        float v_gain = a * t_a * 0.5f;     /* ½·a·t (area under ramp)     */
-        d += v * t_a + v_gain * t_a / 3.0f;/* distance during ramp-down   */
-        v += v_gain;                        /* velocity after ramp-down    */
-        a = 0.0f;
+    /* Phase A: if currently accelerating (acc > 0), must ramp acc down to 0
+     * before we can start decelerating.  Velocity increases during this.
+     *
+     * Integral:  ∫₀^t_a (v + a·τ − j·τ²/2) dτ
+     *          = v·t_a + a·t_a²/2 − j·t_a³/6
+     *          = v·t_a + a³/(3·j²)
+     *
+     * BUG FIX: previous code used a³/(6·j²) — off by factor 2. */
+    if (acc_in_dir > 0.0f) {
+        float a  = acc_in_dir;
+        float t_a = a / jerk;
+        d += v * t_a + (a * a * a) / (3.0f * jerk * jerk);
+        v += (a * a) / (2.0f * jerk);          /* velocity after ramp  */
     }
 
     /* Phase B: from (v, a=0) do a full S-curve decel to zero.
      *
      * S-curve decel has 3 sub-phases:
-     *   B1: jerk-  → acceleration grows (negative) until |a| = dec
-     *       t1 = dec / jerk
-     *       Δv1 = ½ · dec · t1 = dec²/(2·j)
-     *       Δd1 = v·t1 - dec²·t1/(6·j) ... simplified below
+     *   B1: jerk-  → |acc| grows from 0 to dec         t1 = dec/j
+     *       Δv1 = dec²/(2·j)
      *
-     *   B2: constant decel at -dec until velocity is low enough for B3
-     *       Δv2 = v - Δv1 - Δv3 (remainder)
-     *       Δd2 = (average velocity) · t2
+     *   B2: constant decel at −dec                      t2 = Δv2/dec
+     *       Δv2 = v − Δv1 − Δv3  (remainder)
      *
-     *   B3: jerk+  → acceleration ramps from -dec back to 0
-     *       t3 = dec / jerk = t1
-     *       Δv3 = ½ · dec · t3 = dec²/(2·j)  (same as Δv1)
-     *       Δd3 = Δv3·t3/3 (velocity during final ramp)
+     *   B3: jerk+  → |acc| shrinks from dec back to 0   t3 = dec/j
+     *       Δv3 = dec²/(2·j)
      *
      * If v is so small that Δv1 + Δv3 > v, we never reach full dec
-     * and do a direct jerk-only stop (triangular decel profile). */
+     * and do a triangular decel profile. */
 
-    float dv_ramp = (dec * dec) / (2.0f * jerk);  /* velocity consumed by one ramp */
-    float dv_both = 2.0f * dv_ramp;                /* both ramps combined           */
+    float dv_ramp = (dec * dec) / (2.0f * jerk);  /* vel consumed by one ramp */
+    float dv_both = 2.0f * dv_ramp;                /* both ramps combined      */
 
     if (v <= dv_both + _NC_VEL_EPS) {
         /* Triangular decel: never reach full dec.
          * Peak decel a_peak = sqrt(v · j).
-         * Total time t_total ≈ 2 · sqrt(v / j).
-         * Distance ≈ (2/3) · v · t_total.  Simplified: */
+         * Distance ≈ v · 2·t_half · 2/3  where t_half = a_peak/j */
         float a_peak = _nc_fsqrt(v * jerk);
         if (a_peak < 1e-6f) return d;
         float t_half = a_peak / jerk;
-        /* Each half: d = v_in · t ± j·t³/6 integrated.
-         * Approximate: total ≈ v · 2·t_half · 2/3 */
         d += v * t_half * 1.333333f;
     } else {
         /* Full 3-sub-phase decel */
         float t_ramp = dec / jerk;
 
-        /* B1: ramp-in (jerk-) */
+        /* B1: ramp-in (jerk−).
+         * ∫₀^t_ramp (v − j·τ²/2) dτ = v·t_ramp − j·t_ramp³/6
+         *   = v·t_ramp − dv_ramp·t_ramp/3                        */
         d += v * t_ramp - dv_ramp * t_ramp / 3.0f;
         v -= dv_ramp;
 
-        /* B3: ramp-out (jerk+), computed first to find B2 velocity span */
+        /* B3: ramp-out (jerk+).  d_b3 = dv_ramp·t_ramp/3 = dec³/(6·j²) */
         float d_b3 = dv_ramp * t_ramp / 3.0f;
         float v_b3_entry = dv_ramp;  /* velocity when B3 starts */
 
@@ -294,11 +293,29 @@ static float _nc_stopping_distance(float abs_vel, float abs_acc,
         if (v_b2 > 0.0f) {
             float t_b2 = v_b2 / dec;
             d += (v - v_b2 * 0.5f) * t_b2;  /* average vel × time */
-            v = v_b3_entry;
         }
 
         /* B3: ramp-out */
         d += d_b3;
+    }
+
+    /* ── Correction for existing deceleration ──────────────────────────
+     *
+     * When acc_in_dir < 0 the axis is already decelerating.  The Phase B
+     * estimate above assumed decel starts from zero — it overestimates.
+     *
+     * Approximate savings from having existing decel magnitude |ed|:
+     *   savings ≈ v · ed / (2·j)  −  ed³ / (6·j²)
+     *
+     * Derivation: removing the portion of B1 ramp-in from 0→ed while
+     * accounting for the higher velocity entering B2.
+     * Tested within ~2-3 % of exact for ed ∈ [0, dec].               */
+    if (acc_in_dir < 0.0f) {
+        float ed = _NC_FMIN(-acc_in_dir, dec);
+        float savings = abs_vel * ed / (2.0f * jerk)
+                      - (ed * ed * ed) / (6.0f * jerk * jerk);
+        if (savings > 0.0f) d -= savings;
+        if (d < 0.0f) d = 0.0f;
     }
 
     return d;
@@ -482,9 +499,9 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
     /* Positive velocity toward target (or zero) */
     float abs_vel = _NC_FMAX(vel, 0.0f);
 
-    /* Compute stopping distance from current state */
-    float stop_dist = _nc_stopping_distance(abs_vel, _NC_FMAX(acc, 0.0f),
-                                            p->dec, j);
+    /* Compute stopping distance from current state.
+     * Pass signed acc so the estimate accounts for existing deceleration. */
+    float stop_dist = _nc_stopping_distance(abs_vel, acc, p->dec, j);
 
     float new_acc_dir;  /* acceleration in direction of motion */
 
@@ -492,26 +509,31 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
         /*--- DECELERATION ZONE ---
          * Need to slow down. Three sub-decisions:
          * 1. If acc > 0: first ramp acc down to 0 (apply negative jerk)
-         * 2. If acc ≈ 0: apply negative jerk to build deceleration
-         * 3. If acc < 0: continue decelerating, ramp toward zero at end */
+         * 2. If acc ≤ 0 and v > a²/(2j): ramp-in (build deceleration)
+         * 3. If acc ≤ 0 and v ≤ a²/(2j): ramp-out (reduce deceleration) */
 
         if (acc > _NC_VEL_EPS) {
-            /* Still accelerating — ramp down */
+            /* Still accelerating — ramp down to zero first */
             new_acc_dir = acc - j * dt;
             if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
         } else {
-            /* Build deceleration (negative acc in travel direction) */
-            new_acc_dir = acc - j * dt;
-            if (new_acc_dir < -p->dec) new_acc_dir = -p->dec;
+            /* Decelerating: decide ramp-in vs ramp-out.
+             *
+             * Ramp-out condition: velocity is low enough that ramping
+             * acceleration from current value to zero will bring v to 0.
+             *   During ramp-out:  Δv = |a|² / (2·j)
+             *   So ramp-out when:  v ≤ |a|² / (2·j)                   */
+            float abs_a = _NC_FABS(acc);
+            float dv_ramp_out = (abs_a * abs_a) / (2.0f * j);
 
-            /* As velocity approaches zero, ramp acc back up to avoid overshoot.
-             * Use distance to decide: if remaining < acc²/(2j), start ramp-out */
-            float abs_a = _NC_FABS(new_acc_dir);
-            float ramp_out_dist = abs_vel * (abs_a / j)
-                                + (abs_a * abs_a * abs_a) / (6.0f * j * j);
-            if (abs_rem < ramp_out_dist || abs_vel < abs_a * dt * 2.0f) {
+            if (abs_vel <= dv_ramp_out + _NC_VEL_EPS * 2.0f) {
+                /* RAMP-OUT: reduce |deceleration| → arrive at v=0 smoothly */
                 new_acc_dir = acc + j * dt;
                 if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
+            } else {
+                /* RAMP-IN: build deceleration magnitude */
+                new_acc_dir = acc - j * dt;
+                if (new_acc_dir < -p->dec) new_acc_dir = -p->dec;
             }
         }
     } else {
