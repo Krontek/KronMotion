@@ -107,7 +107,7 @@ static bool _nc_latch_cmd(NC_AXIS *nc)
     nc->priv.latched_cmd = ref->cmd_Cmd;
     nc->priv.target_pos  = ref->cmd_TargetPos;
     nc->priv.target_vel  = ref->cmd_TargetVel;
-    nc->priv.v_max       = ref->cmd_TargetVel;
+    nc->priv.v_max       = _NC_FABS(ref->cmd_TargetVel);
     nc->priv.acc         = ref->cmd_Accel;
     nc->priv.dec         = ref->cmd_Decel;
     nc->priv.jerk        = ref->cmd_Jerk;
