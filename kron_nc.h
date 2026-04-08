@@ -60,6 +60,10 @@ typedef struct {
     bool    power_requested;    /* MC_Power Enable = TRUE acknowledged      */
     bool    op_enabled;         /* Drive is in Operation Enabled state      */
 
+    /* ── Drive-delegated homing sub-state (CiA402 Mode 6) ──────── */
+    /* 0=idle, 1=switch_to_hm, 2=start_homing, 3=wait_attained     */
+    uint8_t homing_phase;
+
     /* ── Superimposed offset accumulator ────────────────────────────── */
     float   superimposed_offset;
     float   superimposed_vel;

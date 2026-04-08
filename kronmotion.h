@@ -104,8 +104,8 @@ typedef struct {
     float             CommandedVelocity;
 
     /* ── Axis scaling metadata (configured at startup, informational) ───── */
-    float             EncoderResolution; /* Encoder counts per motor rev      */
     float             GearRatio;         /* User units per motor rev (e.g. 5 = 1 rev → 5 mm) */
+    KRON_ENCODER_TYPE EncoderType;       /* Feedback encoder type             */
 
     /* ── Axis-level status (written by NC) ──────────────────────────────── */
     bool              IsHomed;

@@ -33,6 +33,13 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+/* ── Encoder feedback type ───────────────────────────────────────────────── */
+typedef enum {
+    KRON_ENC_INCREMENTAL = 0,   /* Requires homing after every power-on    */
+    KRON_ENC_ABSOLUTE_ST = 1,   /* Single-turn absolute (0..360 deg)       */
+    KRON_ENC_ABSOLUTE_MT = 2,   /* Multi-turn absolute (full travel range) */
+} KRON_ENCODER_TYPE;
+
 /* ── Capacity limits ─────────────────────────────────────────────────────── */
 #define KRON_MAX_SERVO_AXES   16
 #define KRON_MAX_DI           256
@@ -101,6 +108,11 @@ typedef struct {
     /* ── Scaling (set once at init by fieldbus config) ── */
     float    counts_per_unit;      /* Encoder counts per user unit [u]          */
     float    vel_raw_per_unit;     /* Raw velocity unit per [u/s]               */
+
+    /* ── Encoder configuration ── */
+    KRON_ENCODER_TYPE encoder_type;        /* Feedback encoder type                     */
+    uint32_t          enc_single_turn_bits;/* Bits per single turn (e.g. 13 = 8192 cts) */
+    uint32_t          enc_multi_turn_bits; /* Multi-turn range bits (e.g. 12 = 4096 rev)*/
 
     /* ── Presence ── */
     bool     present;              /* TRUE if this slot is connected to a drive */

@@ -38,6 +38,8 @@
 #define CIA402_SW_QS     0x0020u  /* Quick stop           */
 #define CIA402_SW_SOD    0x0040u  /* Switch on disabled   */
 #define CIA402_SW_WARN   0x0080u  /* Warning              */
+#define CIA402_SW_TARGET_REACHED  0x0400u  /* Bit 10              */
+#define CIA402_SW_HOMING_ATTAINED 0x1000u  /* Bit 12              */
 
 /* Controlword (0x6040) commands */
 #define CIA402_CW_SO     0x0006u  /* Shutdown             */
@@ -46,6 +48,7 @@
 #define CIA402_CW_FACK   0x0080u  /* Fault reset          */
 #define CIA402_CW_QS     0x0006u  /* Quick stop           */
 #define CIA402_CW_DISABLE 0x0000u /* Disable voltage      */
+#define CIA402_CW_HM_START 0x0010u /* Bit 4: start homing  */
 
 /* CiA402 Modes of Operation (0x6060) */
 #define CIA402_MODE_CSP  8   /* Cyclic Synchronous Position */
@@ -162,8 +165,10 @@ static bool _nc_cia402_step(NC_AXIS *nc)
     }
 
     /* Set mode of operation EARLY — many drives require this before enabling.
-     * CSP (Cyclic Synchronous Position) is the default for NC-style control. */
-    slot->mode_of_operation = CIA402_MODE_CSP;
+     * CSP (Cyclic Synchronous Position) is the default for NC-style control.
+     * During drive-delegated homing the homing state machine owns the mode. */
+    if (nc->priv.homing_phase == 0)
+        slot->mode_of_operation = CIA402_MODE_CSP;
 
     /* Step through CiA402 sequence: Not Ready → Switch-on Disabled
      * → Ready to Switch On → Switched On → Operation Enabled             */
@@ -838,6 +843,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
                 ref->sts_Busy   = true;
                 ref->sts_Done   = false;
                 ref->sts_Error  = false;
+                p->homing_phase = 1;  /* start CiA402 homing sequence */
                 break;
 
             case NC_CMD_NONE:
@@ -866,6 +872,11 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
         ref->sts_State     = MC_AXIS_STANDSTILL;
         ref->sts_Busy      = false;
         ref->sts_Done      = false;
+        /* Absolute encoders are inherently homed — position is valid at power-on */
+        if (ref->EncoderType == KRON_ENC_ABSOLUTE_ST ||
+            ref->EncoderType == KRON_ENC_ABSOLUTE_MT) {
+            ref->IsHomed = true;
+        }
     }
 
     /* ── 4. Run motion profile for current state ──────────────────────────── */
@@ -913,15 +924,85 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
         }
 
         case MC_AXIS_HOMING: {
-            /* Simple homing: snap commanded position to cmd_HomePos,
-             * mark axis as homed.  Hardware homing sequences can extend this. */
-            p->cmd_pos        = ref->cmd_HomePos;
-            p->cmd_vel        = 0.0f;
-            p->cmd_acc        = 0.0f;
-            ref->IsHomed      = true;
-            ref->sts_Done     = true;
-            ref->sts_Busy     = false;
-            ref->sts_State    = MC_AXIS_STANDSTILL;
+            /* ── Simulation / no-slot: instant snap (legacy behaviour) ──── */
+            if (ref->Simulation || !ref->slot || !ref->slot->present) {
+                p->cmd_pos     = ref->cmd_HomePos;
+                p->cmd_vel     = 0.0f;
+                p->cmd_acc     = 0.0f;
+                ref->IsHomed   = true;
+                ref->sts_Done  = true;
+                ref->sts_Busy  = false;
+                ref->sts_State = MC_AXIS_STANDSTILL;
+                p->homing_phase = 0;
+                break;
+            }
+
+            /* ── CiA 402 drive-delegated homing (Mode 6) ──────────────── */
+            KRON_SERVO_SLOT *hslot = ref->slot;
+            uint16_t hsw = hslot->status_word;
+
+            /* Fault during homing → error */
+            if (_cia402_fault(hsw)) {
+                ref->sts_Error   = true;
+                ref->sts_ErrorID = 0x8010u;
+                ref->sts_State   = MC_AXIS_ERRORSTOP;
+                ref->sts_Busy    = false;
+                p->homing_phase  = 0;
+                break;
+            }
+
+            switch (p->homing_phase) {
+                case 1:
+                    /* Phase 1: request Homing Mode (mode 6) */
+                    hslot->mode_of_operation = CIA402_MODE_HM;
+                    hslot->control_word      = CIA402_CW_OE;  /* enabled, no start yet */
+                    if (hslot->mode_display == CIA402_MODE_HM)
+                        p->homing_phase = 2;
+                    break;
+
+                case 2:
+                    /* Phase 2: assert Homing Start (controlword bit 4) */
+                    hslot->mode_of_operation = CIA402_MODE_HM;
+                    hslot->control_word      = CIA402_CW_OE | CIA402_CW_HM_START;
+                    /* Transition to waiting once the drive clears Homing Attained
+                     * (some drives clear bit 12 on start, others don't — safe
+                     * to advance immediately and let phase 3 detect completion). */
+                    p->homing_phase = 3;
+                    break;
+
+                case 3: {
+                    /* Phase 3: wait for Homing Attained (bit 12) + Target Reached (bit 10) */
+                    hslot->mode_of_operation = CIA402_MODE_HM;
+                    hslot->control_word      = CIA402_CW_OE | CIA402_CW_HM_START;
+
+                    bool attained = (hsw & CIA402_SW_HOMING_ATTAINED) != 0;
+                    bool reached  = (hsw & CIA402_SW_TARGET_REACHED)  != 0;
+
+                    if (attained && reached) {
+                        /* Homing complete — sync NC position from drive actual */
+                        _nc_read_pi(nc);
+                        p->cmd_pos  = ref->ActualPosition;
+                        p->cmd_vel  = 0.0f;
+                        p->cmd_acc  = 0.0f;
+                        ref->IsHomed = true;
+
+                        /* Switch back to CSP mode */
+                        hslot->mode_of_operation = CIA402_MODE_CSP;
+                        hslot->control_word      = CIA402_CW_OE;
+
+                        ref->sts_Done  = true;
+                        ref->sts_Busy  = false;
+                        ref->sts_State = MC_AXIS_STANDSTILL;
+                        p->homing_phase = 0;
+                    }
+                    break;
+                }
+
+                default:
+                    /* Unexpected phase — reset */
+                    p->homing_phase = 0;
+                    break;
+            }
             break;
         }
 
