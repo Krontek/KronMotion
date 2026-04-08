@@ -364,10 +364,9 @@ static bool _nc_profile_vel(NC_AXIS_INTERNAL *p, float dt)
     float j = p->jerk;
 
     if (j <= 0.0f) {
-        /*--- Trapezoidal fallback: instant acceleration changes ---*/
+        /*--- Trapezoidal: instant acceleration changes ---*/
         float limit = (dir > 0.0f) ? p->acc : p->dec;
         float new_vel = p->cmd_vel + dir * limit * dt;
-        /* Overshoot clamp */
         if ((dir > 0.0f && new_vel > p->target_vel) ||
             (dir < 0.0f && new_vel < p->target_vel))
             new_vel = p->target_vel;
@@ -383,29 +382,47 @@ static bool _nc_profile_vel(NC_AXIS_INTERNAL *p, float dt)
 
     /* Distance (in velocity space) to decelerate current acc to zero:
      * dv_ramp_down = a²/(2·j) */
-    float dv_ramp_down = (acc * dir > 0.0f)
+    float acc_toward = acc * dir;  /* positive when acc helps reach target */
+    float dv_ramp_down = (acc_toward > 0.0f)
         ? (acc * acc) / (2.0f * j)
         : 0.0f;
 
+    /* Anticipation margin: account for velocity added this cycle plus
+     * discrete-time lag (same idea as _nc_profile_pos stopping margin) */
+    float margin = _NC_FABS(acc) * dt * 2.0f;
+
     float new_acc;
-    if (abs_diff <= dv_ramp_down + _NC_VEL_EPS) {
+    if (acc_toward < -_NC_VEL_EPS) {
+        /* Acc is opposing desired direction (inherited from previous cmd).
+         * Ramp it toward zero with jerk — don't use ramp-down/up logic. */
+        new_acc = acc + dir * j * dt;
+        /* Don't let it cross zero and build in desired direction yet —
+         * that's handled by the normal branch once acc_toward >= 0. */
+        if ((new_acc * dir) > 0.0f)
+            new_acc = 0.0f;
+    } else if (abs_diff <= dv_ramp_down + margin + _NC_VEL_EPS) {
         /* Must start reducing acceleration to arrive at target vel smoothly */
         new_acc = acc - dir * j * dt;
+        /* Don't overshoot zero (would push vel away from target) */
+        if ((acc * dir > 0.0f) && (new_acc * dir < 0.0f))
+            new_acc = 0.0f;
     } else {
         /* Can still increase acceleration toward acc_limit */
         new_acc = acc + dir * j * dt;
     }
 
-    /* Clamp acceleration magnitude */
-    float clamped_acc = _NC_CLAMP(new_acc, -acc_limit, acc_limit);
-
-    /* If clamping changed direction of jerk, we were overshooting acc limit */
-    new_acc = clamped_acc;
+    /* Clamp acceleration only in the desired direction.
+     * When acc is opposing (being ramped toward zero by jerk above),
+     * don't hard-clamp — let jerk do the work smoothly. */
+    if (new_acc * dir > 0.0f) {
+        if (_NC_FABS(new_acc) > acc_limit)
+            new_acc = dir * acc_limit;
+    }
 
     /* Integrate: acc → vel */
     float new_vel = p->cmd_vel + new_acc * dt;
 
-    /* Velocity overshoot clamp */
+    /* Velocity overshoot clamp (safety net — ramp-down should prevent this) */
     if ((dir > 0.0f && new_vel > p->target_vel) ||
         (dir < 0.0f && new_vel < p->target_vel)) {
         new_vel = p->target_vel;
@@ -456,14 +473,26 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
     float j = p->jerk;
 
     if (j <= 0.0f) {
-        /*--- Trapezoidal fallback ---*/
+        /*--- Trapezoidal: instant acceleration changes ---*/
         float abs_vel = _NC_FMAX(vel, 0.0f);
         float brake_dist = (abs_vel * abs_vel) / (2.0f * p->dec + 1e-9f);
         float new_abs_vel;
 
-        if (brake_dist >= abs_rem) {
+        if (vel < -_NC_VEL_EPS) {
+            /* Wrong direction: decelerate then reverse */
+            new_abs_vel = _NC_FABS(vel) - p->dec * dt;
+            if (new_abs_vel < 0.0f) new_abs_vel = 0.0f;
+            float nv = -new_abs_vel * dir;  /* keep wrong direction, reducing */
+            p->cmd_acc = (nv - p->cmd_vel) / (dt + 1e-12f);
+            p->cmd_pos += 0.5f * (p->cmd_vel + nv) * dt;
+            p->cmd_vel = nv;
+            return false;
+        } else if (brake_dist >= abs_rem) {
             new_abs_vel = abs_vel - p->dec * dt;
             if (new_abs_vel < 0.0f) new_abs_vel = 0.0f;
+        } else if (abs_vel > p->v_max) {
+            new_abs_vel = abs_vel - p->dec * dt;
+            if (new_abs_vel < p->v_max) new_abs_vel = p->v_max;
         } else {
             new_abs_vel = abs_vel + p->acc * dt;
             if (new_abs_vel > p->v_max) new_abs_vel = p->v_max;
@@ -472,7 +501,6 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
         float nv = new_abs_vel * dir;
         float np = p->cmd_pos + 0.5f * (p->cmd_vel + nv) * dt;
 
-        /* Overshoot clamp */
         if (dir > 0.0f && np > p->target_pos) { np = p->target_pos; nv = 0.0f; }
         if (dir < 0.0f && np < p->target_pos) { np = p->target_pos; nv = 0.0f; }
 
@@ -484,11 +512,19 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
 
     /*--- S-curve position mode ---*/
 
-    /* Handle wrong-direction velocity: must decelerate first */
+    /* Handle wrong-direction velocity: must decelerate first.
+     * Cap at min(dec, acc) so there's no discontinuity when vel crosses
+     * zero and the normal branch takes over (which clamps to acc).
+     *
+     * Also cap so that when vel crosses zero, the acc ramp-down to zero
+     * doesn't overshoot v_max.  Ramp-down from a to 0 adds dv = a²/(2j)
+     * velocity.  Need: a ≤ sqrt(2 · j · v_max). */
     if (vel < -_NC_VEL_EPS) {
-        /* Velocity is away from target — apply jerk toward target */
+        float limit = _NC_FMIN(p->dec, p->acc);
+        float vmax_limit = _nc_fsqrt(2.0f * j * p->v_max);
+        limit = _NC_FMIN(limit, vmax_limit);
         float new_acc = acc + j * dt;
-        if (new_acc > p->dec) new_acc = p->dec;
+        if (new_acc > limit) new_acc = limit;
         float nv = (vel + new_acc * dt) * dir;
         p->cmd_pos += 0.5f * (p->cmd_vel + nv) * dt;
         p->cmd_vel = nv;
@@ -500,8 +536,10 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
     float abs_vel = _NC_FMAX(vel, 0.0f);
 
     /* Compute stopping distance from current state.
-     * Pass signed acc so the estimate accounts for existing deceleration. */
+     * Pass signed acc so the estimate accounts for existing deceleration.
+     * Add small margin to compensate for discrete-time integration error. */
     float stop_dist = _nc_stopping_distance(abs_vel, acc, p->dec, j);
+    stop_dist += abs_vel * dt * 3.0f;  /* ~3 cycle margin */
 
     float new_acc_dir;  /* acceleration in direction of motion */
 
@@ -538,25 +576,53 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
         }
     } else {
         /*--- ACCELERATION / CRUISE ZONE ---*/
-        if (abs_vel >= p->v_max - _NC_VEL_EPS) {
+        if (abs_vel > p->v_max + _NC_VEL_EPS) {
+            /* Above v_max (e.g. new command lowered v_max mid-motion):
+             * jerk-limited deceleration toward v_max, same ramp-in/out
+             * logic as decel zone but targeting v_max instead of zero. */
+            float vel_excess = abs_vel - p->v_max;
+            float abs_a = (acc < -_NC_VEL_EPS) ? -acc : 0.0f;
+            float dv_ramp_out = (abs_a * abs_a) / (2.0f * j + 1e-9f);
+
+            if (vel_excess <= dv_ramp_out + _NC_VEL_EPS) {
+                /* Ramp-out: ease off deceleration to arrive at v_max */
+                new_acc_dir = acc + j * dt;
+                if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
+            } else {
+                /* Ramp-in: build deceleration */
+                new_acc_dir = acc - j * dt;
+                if (new_acc_dir < -p->dec) new_acc_dir = -p->dec;
+            }
+        } else if (abs_vel >= p->v_max - _NC_VEL_EPS) {
             /* At cruise speed — ramp acceleration to zero */
             if (acc > _NC_VEL_EPS) {
                 new_acc_dir = acc - j * dt;
                 if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+            } else if (acc < -_NC_VEL_EPS) {
+                /* Negative acc (from above-v_max decel): ramp up to 0 */
+                new_acc_dir = acc + j * dt;
+                if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
             } else {
                 new_acc_dir = 0.0f;
             }
         } else {
-            /* Accelerating toward v_max */
-            new_acc_dir = acc + j * dt;
-            if (new_acc_dir > p->acc) new_acc_dir = p->acc;
+            /* Below v_max */
+            if (acc < -_NC_VEL_EPS) {
+                /* Negative acc (from above-v_max decel): ramp toward 0 first */
+                new_acc_dir = acc + j * dt;
+                if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
+            } else {
+                /* Normal acceleration toward v_max */
+                new_acc_dir = acc + j * dt;
+                if (new_acc_dir > p->acc) new_acc_dir = p->acc;
 
-            /* Don't overshoot v_max — check if we need to ramp down acc */
-            float vel_headroom = p->v_max - abs_vel;
-            float dv_ramp_down = (new_acc_dir * new_acc_dir) / (2.0f * j);
-            if (vel_headroom <= dv_ramp_down + _NC_VEL_EPS) {
-                new_acc_dir = acc - j * dt;
-                if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+                /* Don't overshoot v_max — check if we need to ramp down acc */
+                float vel_headroom = p->v_max - abs_vel;
+                float dv_ramp_down = (new_acc_dir * new_acc_dir) / (2.0f * j);
+                if (vel_headroom <= dv_ramp_down + _NC_VEL_EPS) {
+                    new_acc_dir = acc - j * dt;
+                    if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+                }
             }
         }
     }
@@ -565,11 +631,10 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
     float real_acc = new_acc_dir * dir;           /* back to world frame */
     float new_vel = p->cmd_vel + real_acc * dt;
 
-    /* Velocity magnitude clamp (never exceed v_max) */
-    float abs_new_vel = _NC_FABS(new_vel);
-    if (abs_new_vel > p->v_max) {
-        new_vel = _NC_SIGN(new_vel) * p->v_max;
-    }
+    /* No velocity safety clamp — the S-curve profile code handles v_max
+     * via the cruise-entry ramp-down and the "above v_max" branch.
+     * Small temporary overshoot during cruise entry is normal S-curve
+     * behavior (vel settles to v_max as acc ramps to 0). */
 
     /* Ensure velocity doesn't reverse past zero while decelerating */
     if (vel >= 0.0f && new_vel * dir < -_NC_VEL_EPS) {
@@ -616,7 +681,7 @@ static bool _nc_decel_to_zero(NC_AXIS_INTERNAL *p, float dt)
     float j = p->jerk;
 
     if (j <= 0.0f) {
-        /*--- Trapezoidal fallback ---*/
+        /*--- Trapezoidal: instant deceleration ---*/
         float sign = _NC_SIGN(vel);
         float new_vel = vel - sign * p->dec * dt;
         if (sign > 0.0f && new_vel < 0.0f) new_vel = 0.0f;

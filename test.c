@@ -78,7 +78,7 @@ static void test_axis_ref_fields(void)
 
     /* Assign every field to verify they exist at the expected type */
     axis.AxisNo             = 0;
-    axis.State              = MC_AXIS_DISABLED;
+    axis.sts_State          = MC_AXIS_DISABLED;
     axis.ActualPosition     = 0.0f;
     axis.ActualVelocity     = 0.0f;
     axis.ActualTorque       = 0.0f;
@@ -87,21 +87,15 @@ static void test_axis_ref_fields(void)
     axis.VelFactor          = 1.0f;
     axis.AccFactor          = 1.0f;
     axis.JerkFactor         = 1.0f;
-    axis.PowerOn            = false;
     axis.IsHomed            = false;
-    axis.Error              = false;
+    axis.sts_Error          = false;
     axis.Simulation         = false;
     axis.AxisErrorID        = 0;
-    axis.HomeAbsSwitch      = false;
-    axis.LimitSwitchPos     = false;
-    axis.LimitSwitchNeg     = false;
-    axis.CommunicationReady = false;
-    axis.ReadyForPowerOn    = false;
     axis.AxisWarning        = false;
 
     check("AXIS_REF fields accessible", 1);
     check("AXIS_REF default VelFactor == 1.0", axis.VelFactor == 1.0f);
-    check("AXIS_REF default State == Disabled", axis.State == MC_AXIS_DISABLED);
+    check("AXIS_REF default State == Disabled", axis.sts_State == MC_AXIS_DISABLED);
 }
 
 /*===========================================================================
@@ -114,7 +108,7 @@ static void test_mc_power(void)
     MC_Power fb;
 
     /* Zero-init structs */
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Enable         = false;
     fb.EnablePositive = false;
@@ -147,7 +141,7 @@ static void test_mc_home(void)
     AXIS_REF axis;
     MC_Home fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute         = false;
     fb.Position        = 0.0f;
@@ -176,7 +170,7 @@ static void test_mc_stop(void)
     AXIS_REF axis;
     MC_Stop fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute        = false;
     fb.Deceleration   = 100.0f;
@@ -202,7 +196,7 @@ static void test_mc_halt(void)
     AXIS_REF axis;
     MC_Halt fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute        = false;
     fb.Deceleration   = 100.0f;
@@ -230,7 +224,7 @@ static void test_mc_move_absolute(void)
     AXIS_REF axis;
     MC_MoveAbsolute fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute           = false;
     fb.ContinuousUpdate  = false;
@@ -265,7 +259,7 @@ static void test_mc_move_relative(void)
     AXIS_REF axis;
     MC_MoveRelative fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute          = false;
     fb.ContinuousUpdate = false;
@@ -298,7 +292,7 @@ static void test_mc_move_additive(void)
     AXIS_REF axis;
     MC_MoveAdditive fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute          = false;
     fb.ContinuousUpdate = false;
@@ -330,7 +324,7 @@ static void test_mc_move_superimposed(void)
     AXIS_REF axis;
     MC_MoveSuperimposed fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute          = false;
     fb.ContinuousUpdate = false;
@@ -364,7 +358,7 @@ static void test_mc_halt_superimposed(void)
     AXIS_REF axis;
     MC_HaltSuperimposed fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute        = false;
     fb.Deceleration   = 50.0f;
@@ -390,7 +384,7 @@ static void test_mc_move_velocity(void)
     AXIS_REF axis;
     MC_MoveVelocity fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute          = false;
     fb.ContinuousUpdate = false;
@@ -423,7 +417,7 @@ static void test_mc_move_continuous_absolute(void)
     AXIS_REF axis;
     MC_MoveContinuousAbsolute fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute          = false;
     fb.ContinuousUpdate = false;
@@ -458,7 +452,7 @@ static void test_mc_move_continuous_relative(void)
     AXIS_REF axis;
     MC_MoveContinuousRelative fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute          = false;
     fb.ContinuousUpdate = false;
@@ -491,7 +485,7 @@ static void test_mc_set_position(void)
     AXIS_REF axis;
     MC_SetPosition fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute       = false;
     fb.Position      = 0.0f;
@@ -518,7 +512,7 @@ static void test_mc_set_override(void)
     AXIS_REF axis;
     MC_SetOverride fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Enable     = false;
     fb.VelFactor  = 1.0f;
@@ -548,7 +542,7 @@ static void test_mc_read_parameter(void)
     MC_ReadParameter fb;
     MC_ReadBoolParameter fbb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Enable          = false;
     fb.ParameterNumber = 10;  /* PN10 = ActualVelocity */
@@ -588,7 +582,7 @@ static void test_mc_write_parameter(void)
     MC_WriteParameter fb;
     MC_WriteBoolParameter fbb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute         = false;
     fb.ParameterNumber = 9;   /* PN9 = MaxVelocityAppl (R/W) */
@@ -625,7 +619,7 @@ static void test_mc_read_actual(void)
     printf("\n--- MC_ReadActual* ---\n");
     AXIS_REF axis;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     /* Position */
     MC_ReadActualPosition pos_fb;
@@ -677,7 +671,7 @@ static void test_mc_read_status(void)
     AXIS_REF axis;
     MC_ReadStatus fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Enable             = false;
     fb.Valid              = false;
@@ -714,7 +708,7 @@ static void test_mc_read_motion_state(void)
     AXIS_REF axis;
     MC_ReadMotionState fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Enable              = false;
     fb.Source              = mcActualValue;
@@ -746,7 +740,7 @@ static void test_mc_read_axis_info(void)
     AXIS_REF axis;
     MC_ReadAxisInfo fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Enable             = false;
     fb.Valid              = false;
@@ -780,7 +774,7 @@ static void test_mc_read_axis_error(void)
     AXIS_REF axis;
     MC_ReadAxisError fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Enable      = false;
     fb.Valid       = false;
@@ -804,7 +798,7 @@ static void test_mc_reset(void)
     AXIS_REF axis;
     MC_Reset fb;
 
-    AXIS_REF_Init(&axis, 0);
+    AXIS_REF_Init(&axis, 0, NULL);
 
     fb.Execute      = false;
     fb.Done         = false;
