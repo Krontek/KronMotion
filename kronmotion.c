@@ -104,14 +104,16 @@ void MC_Home_Call(MC_Home *inst, AXIS_REF *axis)
     }
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (rising) {
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st != MC_AXIS_STANDSTILL && st != MC_AXIS_HOMING) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_myToken = _axis_take_token(axis);
         axis->cmd_Cmd      = NC_CMD_HOME;
         axis->cmd_TargetPos = inst->Position;
@@ -258,9 +260,10 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute = inst->Execute;
         inst->Error   = true;
         inst->ErrorID = axis->sts_ErrorID;
         inst->Busy    = false;
@@ -272,17 +275,21 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st != MC_AXIS_STANDSTILL && st != MC_AXIS_DISCRETE_MOTION &&
             st != MC_AXIS_CONTINUOUS_MOTION) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
         if (!axis->IsHomed) {
+            /* Don't consume the rising edge — auto-retry when homed */
             _FB_ERR(inst, _MC_ERR_NOT_HOMED);
             return;
         }
         if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+            inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                           inst->Position, inst->Velocity,
@@ -333,9 +340,10 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute = inst->Execute;
         inst->Error   = true;
         inst->ErrorID = axis->sts_ErrorID;
         inst->Busy    = false;
@@ -347,14 +355,17 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st != MC_AXIS_STANDSTILL && st != MC_AXIS_DISCRETE_MOTION &&
             st != MC_AXIS_CONTINUOUS_MOTION) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
         if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+            inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
         /* Absolute target is resolved here for ContinuousUpdate */
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_targetPosition = axis->CommandedPosition + inst->Distance;
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
@@ -405,9 +416,10 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute = inst->Execute;
         inst->Error   = true;
         inst->ErrorID = axis->sts_ErrorID;
         inst->Busy    = false;
@@ -418,14 +430,17 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
     if (rising) {
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st != MC_AXIS_STANDSTILL && st != MC_AXIS_DISCRETE_MOTION) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
         if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+            inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
         /* Additive: add Distance on top of the NC engine's current commanded pos */
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_targetPosition = axis->CommandedPosition + inst->Distance;
         inst->_myToken = _axis_take_token(axis);
         /* NC_CMD_MOVE_ADD: NC engine adds this on top of in-flight motion */
@@ -481,9 +496,10 @@ void MC_MoveSuperimposed_Call(MC_MoveSuperimposed *inst, AXIS_REF *axis)
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute = inst->Execute;
         inst->Error   = true;
         inst->ErrorID = axis->sts_ErrorID;
         inst->Busy    = false;
@@ -494,9 +510,11 @@ void MC_MoveSuperimposed_Call(MC_MoveSuperimposed *inst, AXIS_REF *axis)
     if (rising) {
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st == MC_AXIS_DISABLED || st == MC_AXIS_ERRORSTOP || st == MC_AXIS_STOPPING) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_coveredSoFar = 0.0f;
         inst->_myToken = _axis_take_token(axis);
         axis->cmd_Cmd       = NC_CMD_MOVE_ADD;
@@ -603,9 +621,10 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute = inst->Execute;
         inst->Error      = true;
         inst->ErrorID    = axis->sts_ErrorID;
         inst->Busy       = false;
@@ -617,15 +636,18 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
     if (rising) {
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st == MC_AXIS_DISABLED || st == MC_AXIS_ERRORSTOP || st == MC_AXIS_STOPPING) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
         if (inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+            inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
         float vel = inst->Velocity;
         if (inst->Direction == mcNegativeDirection) vel = -vel;
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_VEL,
                           0.0f, vel,
@@ -676,9 +698,10 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute  = inst->Execute;
         inst->Error         = true;
         inst->ErrorID       = axis->sts_ErrorID;
         inst->Busy          = false;
@@ -691,14 +714,21 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st != MC_AXIS_STANDSTILL && st != MC_AXIS_DISCRETE_MOTION &&
             st != MC_AXIS_CONTINUOUS_MOTION) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
-        if (!axis->IsHomed) { _FB_ERR(inst, _MC_ERR_NOT_HOMED); return; }
+        if (!axis->IsHomed) {
+            /* Don't consume the rising edge — auto-retry when homed */
+            _FB_ERR(inst, _MC_ERR_NOT_HOMED);
+            return;
+        }
         if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+            inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                           inst->Position, inst->Velocity,
@@ -742,9 +772,10 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute = inst->Execute;
         inst->Error = true; inst->ErrorID = axis->sts_ErrorID;
         inst->Busy = false; inst->Active = false; inst->InEndVelocity = false;
         return;
@@ -754,13 +785,16 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st != MC_AXIS_STANDSTILL && st != MC_AXIS_DISCRETE_MOTION &&
             st != MC_AXIS_CONTINUOUS_MOTION) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
         if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+            inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         inst->_targetPosition = axis->CommandedPosition + inst->Distance;
         inst->_myToken = _axis_take_token(axis);
         _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
@@ -804,9 +838,10 @@ void MC_SetPosition_Call(MC_SetPosition *inst, AXIS_REF *axis)
     _AXIS_SAFE(axis, inst);
 
     bool rising = inst->Execute && !inst->_prevExecute;
-    inst->_prevExecute = inst->Execute;
+    if (!rising) inst->_prevExecute = inst->Execute;
 
     if (axis->sts_Error) {
+        inst->_prevExecute = inst->Execute;
         inst->Error = true; inst->ErrorID = axis->sts_ErrorID;
         inst->Busy = false;
         return;
@@ -815,9 +850,11 @@ void MC_SetPosition_Call(MC_SetPosition *inst, AXIS_REF *axis)
     if (rising) {
         MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
         if (st != MC_AXIS_STANDSTILL) {
+            /* Don't consume the rising edge — auto-retry when state improves */
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
+        inst->_prevExecute = inst->Execute;  /* consume edge on successful dispatch */
         float new_pos = inst->Relative
                         ? axis->ActualPosition + inst->Position
                         : inst->Position;

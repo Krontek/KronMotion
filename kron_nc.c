@@ -872,8 +872,11 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
         ref->sts_State     = MC_AXIS_STANDSTILL;
         ref->sts_Busy      = false;
         ref->sts_Done      = false;
-        /* Absolute encoders are inherently homed — position is valid at power-on */
-        if (ref->EncoderType == KRON_ENC_ABSOLUTE_ST ||
+        /* Absolute encoders are inherently homed — position is valid at power-on.
+         * In simulation mode the position is always known (tracked in software),
+         * so treat the axis as homed automatically on first power-on. */
+        if (ref->Simulation ||
+            ref->EncoderType == KRON_ENC_ABSOLUTE_ST ||
             ref->EncoderType == KRON_ENC_ABSOLUTE_MT) {
             ref->IsHomed = true;
         }
