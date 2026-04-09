@@ -130,6 +130,16 @@ void MC_Home_Call(MC_Home *inst, AXIS_REF *axis)
 
     if (!inst->Busy) return;
 
+    /* Abort if axis lost power */
+    MC_AXIS_STATE hs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (hs == MC_AXIS_DISABLED) {
+        inst->Busy           = false;
+        inst->Active         = false;
+        inst->CommandAborted = true;
+        inst->Done           = false;
+        return;
+    }
+
     /* Check abort by another FB */
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy           = false;
@@ -184,6 +194,14 @@ void MC_Stop_Call(MC_Stop *inst, AXIS_REF *axis)
 
     if (!inst->Busy) return;
 
+    /* Abort if axis lost power */
+    MC_AXIS_STATE ss = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (ss == MC_AXIS_DISABLED) {
+        inst->Done = false;
+        inst->Busy = false;
+        return;
+    }
+
     if (axis->sts_Error) {
         inst->Error   = true;
         inst->ErrorID = axis->sts_ErrorID;
@@ -233,6 +251,15 @@ void MC_Halt_Call(MC_Halt *inst, AXIS_REF *axis)
     }
 
     if (!inst->Busy) return;
+
+    /* Abort if axis lost power */
+    MC_AXIS_STATE hts = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (hts == MC_AXIS_DISABLED) {
+        inst->Busy           = false;
+        inst->Active         = false;
+        inst->CommandAborted = true;
+        return;
+    }
 
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy           = false;
@@ -305,14 +332,26 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
         return;
     }
 
-    /* ContinuousUpdate: republish while Busy */
+    /* ContinuousUpdate: republish while Busy — skip if axis lost power */
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
-                          inst->Position, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration, inst->Jerk);
+        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+            _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
+                              inst->Position, inst->Velocity,
+                              inst->Acceleration, inst->Deceleration, inst->Jerk);
+        }
     }
 
     if (!inst->Busy) return;
+
+    /* Abort if axis lost power */
+    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (bs == MC_AXIS_DISABLED) {
+        inst->Busy           = false;
+        inst->Active         = false;
+        inst->CommandAborted = true;
+        return;
+    }
 
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy           = false;
@@ -383,12 +422,23 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
-                          inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration, inst->Jerk);
+        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+            _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
+                              inst->_targetPosition, inst->Velocity,
+                              inst->Acceleration, inst->Deceleration, inst->Jerk);
+        }
     }
 
     if (!inst->Busy) return;
+
+    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (bs == MC_AXIS_DISABLED) {
+        inst->Busy           = false;
+        inst->Active         = false;
+        inst->CommandAborted = true;
+        return;
+    }
 
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy           = false;
@@ -459,12 +509,23 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        _axis_publish_cmd(axis, NC_CMD_MOVE_ADD,
-                          inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration, inst->Jerk);
+        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+            _axis_publish_cmd(axis, NC_CMD_MOVE_ADD,
+                              inst->_targetPosition, inst->Velocity,
+                              inst->Acceleration, inst->Deceleration, inst->Jerk);
+        }
     }
 
     if (!inst->Busy) return;
+
+    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (bs == MC_AXIS_DISABLED) {
+        inst->Busy           = false;
+        inst->Active         = false;
+        inst->CommandAborted = true;
+        return;
+    }
 
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy           = false;
@@ -664,14 +725,26 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        float vel = inst->Velocity;
-        if (inst->Direction == mcNegativeDirection) vel = -vel;
-        _axis_publish_cmd(axis, NC_CMD_MOVE_VEL,
-                          0.0f, vel,
-                          inst->Acceleration, inst->Deceleration, inst->Jerk);
+        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+            float vel = inst->Velocity;
+            if (inst->Direction == mcNegativeDirection) vel = -vel;
+            _axis_publish_cmd(axis, NC_CMD_MOVE_VEL,
+                              0.0f, vel,
+                              inst->Acceleration, inst->Deceleration, inst->Jerk);
+        }
     }
 
     if (!inst->Busy) return;
+
+    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (bs == MC_AXIS_DISABLED) {
+        inst->Busy           = false;
+        inst->Active         = false;
+        inst->InVelocity     = false;
+        inst->CommandAborted = true;
+        return;
+    }
 
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy           = false;
@@ -745,12 +818,21 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
-                          inst->Position, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration, inst->Jerk);
+        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+            _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
+                              inst->Position, inst->Velocity,
+                              inst->Acceleration, inst->Deceleration, inst->Jerk);
+        }
     }
 
     if (!inst->Busy) return;
+
+    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (bs == MC_AXIS_DISABLED) {
+        inst->Busy = false; inst->Active = false; inst->CommandAborted = true;
+        return;
+    }
 
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy = false; inst->Active = false; inst->CommandAborted = true;
@@ -809,12 +891,21 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
-                          inst->_targetPosition, inst->Velocity,
-                          inst->Acceleration, inst->Deceleration, inst->Jerk);
+        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+            _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
+                              inst->_targetPosition, inst->Velocity,
+                              inst->Acceleration, inst->Deceleration, inst->Jerk);
+        }
     }
 
     if (!inst->Busy) return;
+
+    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
+    if (bs == MC_AXIS_DISABLED) {
+        inst->Busy = false; inst->Active = false; inst->CommandAborted = true;
+        return;
+    }
 
     if (_axis_token_aborted(axis, inst->_myToken)) {
         inst->Busy = false; inst->Active = false; inst->CommandAborted = true;
