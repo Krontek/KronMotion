@@ -45,6 +45,7 @@ struct LogEntry {
     float       vel;
     std::string msg;
     ImVec4      color;
+    bool        is_anomaly = true; /* true = error/warning, false = info (CMD) */
 };
 
 /* ── Plot data ──────────────────────────────────────────────────────────── */
@@ -110,6 +111,7 @@ struct CommandCache {
 
     /* ── Commanded limits ──────────────────────────────────────────────── */
     float   target_pos;             /* position target (abs/rel)           */
+    float   target_vel;             /* velocity target (signed, vel mode)  */
     float   v_max;                  /* velocity limit                      */
     float   acc_limit;              /* acceleration limit                  */
     float   dec_limit;              /* deceleration limit                  */
@@ -177,12 +179,12 @@ static std::string fmt_cmd_context(const CommandCache &cc, float t_now)
     char buf[512];
     snprintf(buf, sizeof(buf),
              "\n    CMD: %s (seq=%u) latched at t=%.3fs"
-             "\n    Limits: v_max=%.2f acc=%.2f dec=%.2f jerk=%.0f target_pos=%.2f"
+             "\n    Limits: v_max=%.2f acc=%.2f dec=%.2f jerk=%.0f target_pos=%.2f target_vel=%.2f"
              "\n    Initial: pos=%.4f vel=%.4f acc=%.4f"
              "\n    Peaks: |vel|=%.4f@%.3fs |acc|=%.4f@%.3fs"
              "\n    Elapsed: %.3fs since latch",
              cmd_type_str(cc.cmd), cc.seq, cc.start_time,
-             cc.v_max, cc.acc_limit, cc.dec_limit, cc.jerk_limit, cc.target_pos,
+             cc.v_max, cc.acc_limit, cc.dec_limit, cc.jerk_limit, cc.target_pos, cc.target_vel,
              cc.start_pos, cc.start_vel, cc.start_acc,
              cc.peak_vel, cc.peak_vel_time, cc.peak_acc, cc.peak_acc_time,
              t_now - cc.start_time);
@@ -234,6 +236,7 @@ static void check_anomalies(PlotData *plot, NC_AXIS *nc, float dt,
         cc.seq          = nc->priv.latched_seq;
         cc.cmd          = nc->priv.latched_cmd;
         cc.target_pos   = nc->priv.target_pos;
+        cc.target_vel   = nc->priv.target_vel;
         cc.v_max        = nc->priv.v_max;
         cc.acc_limit    = nc->priv.acc;
         cc.dec_limit    = nc->priv.dec;
@@ -401,7 +404,16 @@ static void check_anomalies(PlotData *plot, NC_AXIS *nc, float dt,
      * ══════════════════════════════════════════════════════════════════════ */
     {
         float abs_acc = std::fabs(acc);
-        bool speeding_up = (vel > 0.0f && acc > 0.0f) || (vel < 0.0f && acc < 0.0f);
+        /* Match NC engine limit selection: acc when ramping toward target,
+         * dec when ramping away.  For MoveVel this is sign(target_vel - vel);
+         * for position/halt/stop commands, direction is sign(acc) vs sign(vel). */
+        bool speeding_up;
+        if (cc.cmd == NC_CMD_MOVE_VEL) {
+            /* NC engine: dir = sign(target_vel - cmd_vel), uses acc if dir>0 */
+            speeding_up = (cc.target_vel >= vel);
+        } else {
+            speeding_up = (vel > 0.0f && acc > 0.0f) || (vel < 0.0f && acc < 0.0f);
+        }
         float limit = speeding_up ? cc.acc_limit : cc.dec_limit;
         float tolerance = limit * (ap.acc_overshoot_pct / 100.0f);
 
@@ -553,10 +565,13 @@ static void nc_thread_func(NC_AXIS *nc, PlotData *plot, float dt,
         float pos = nc->ref->CommandedPosition;
         float vel = nc->ref->CommandedVelocity;
         float acc = nc->priv.cmd_acc;
-        float jrk = (plot->t_elapsed > dt) ? (acc - plot->prev_acc) / dt : 0.0f;
-
-        /* anomaly check with command cache */
+        /* anomaly check with command cache (updates suppress_cycles) */
         check_anomalies(plot, nc, dt, *ap, cc, *log, *log_mtx);
+
+        /* Numerical jerk — suppress spikes during command transitions */
+        float jrk = 0.0f;
+        if (plot->t_elapsed > dt && cc.suppress_cycles == 0)
+            jrk = (acc - plot->prev_acc) / dt;
 
         /* position settling check: discrete motion -> standstill
          * Uses cached target (not g_target_pos) to avoid race with random thread */
@@ -653,7 +668,7 @@ static void random_thread_func(AXIS_REF *axis, const RandomParams *rp,
                      "(cur_pos=%.4f cur_vel=%.4f)",
                      t, tgt, vel, acc, dec, jerk, cur_pos, cur_vel);
             std::lock_guard<std::mutex> lk(*log_mtx);
-            log->push_back({t, cur_pos, cur_vel, buf, ImVec4(0.4f, 0.7f, 1, 1)});
+            log->push_back({t, cur_pos, cur_vel, buf, ImVec4(0.4f, 0.7f, 1, 1), false});
         } else if (do_vel) {
             std::uniform_real_distribution<float> dist_svel(-rp->vel_max, rp->vel_max);
             float svel = dist_svel(rng);
@@ -668,7 +683,7 @@ static void random_thread_func(AXIS_REF *axis, const RandomParams *rp,
                      "(cur_pos=%.4f cur_vel=%.4f)",
                      t, svel, acc, dec, jerk, cur_pos, cur_vel);
             std::lock_guard<std::mutex> lk(*log_mtx);
-            log->push_back({t, cur_pos, cur_vel, buf, ImVec4(0.4f, 0.7f, 1, 1)});
+            log->push_back({t, cur_pos, cur_vel, buf, ImVec4(0.4f, 0.7f, 1, 1), false});
         }
 
         /* sleep for random interval, checking exit flag */
@@ -995,7 +1010,7 @@ int main()
                 std::string path = save_log(log_entries, plot, "tool");
                 if (!path.empty())
                     log_entries.push_back({plot.t_elapsed, 0, 0,
-                        "Saved: " + path, ImVec4(0.3f, 1, 0.3f, 1)});
+                        "Saved: " + path, ImVec4(0.3f, 1, 0.3f, 1), false});
             }
             g_random_pos.store(!rp);
         }
@@ -1011,7 +1026,7 @@ int main()
                 std::string path = save_log(log_entries, plot, "tool");
                 if (!path.empty())
                     log_entries.push_back({plot.t_elapsed, 0, 0,
-                        "Saved: " + path, ImVec4(0.3f, 1, 0.3f, 1)});
+                        "Saved: " + path, ImVec4(0.3f, 1, 0.3f, 1), false});
             }
             g_random_vel.store(!rv);
         }
@@ -1052,6 +1067,8 @@ int main()
 
         /* ── Log ────────────────────────────────────────────────────────── */
         ImGui::SeparatorText("Log");
+        static bool show_only_errors = true;
+        ImGui::Checkbox("Errors only", &show_only_errors);
         {
             float log_h = ImGui::GetContentRegionAvail().y;
             ImGui::BeginChild("LogScroll", ImVec2(0, log_h), ImGuiChildFlags_Borders);
@@ -1060,6 +1077,7 @@ int main()
             while ((int)log_entries.size() > MAX_LOG)
                 log_entries.pop_front();
             for (auto &e : log_entries) {
+                if (show_only_errors && !e.is_anomaly) continue;
                 ImGui::PushStyleColor(ImGuiCol_Text, e.color);
                 ImGui::TextWrapped("%s", e.msg.c_str());
                 ImGui::PopStyleColor();
