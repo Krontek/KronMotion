@@ -63,6 +63,17 @@ void MC_Power_Call(MC_Power *inst, AXIS_REF *axis)
     bool falling = !inst->Enable &&  inst->_prevEnable;
     inst->_prevEnable = inst->Enable;
 
+    /* Dispatch power command BEFORE error check — POWER_ON is the recovery
+     * mechanism that clears sts_Error in the NC engine, so it must not be
+     * blocked by the very error it is supposed to clear. */
+    if (rising) {
+        axis->cmd_Cmd = NC_CMD_POWER_ON;
+        KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);
+    } else if (falling) {
+        axis->cmd_Cmd = NC_CMD_POWER_OFF;
+        KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);
+    }
+
     /* Reflect axis errors */
     if (axis->sts_Error) {
         inst->Error   = true;
@@ -72,14 +83,6 @@ void MC_Power_Call(MC_Power *inst, AXIS_REF *axis)
         return;
     }
     inst->Error = false;
-
-    if (rising) {
-        axis->cmd_Cmd = NC_CMD_POWER_ON;
-        KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);
-    } else if (falling) {
-        axis->cmd_Cmd = NC_CMD_POWER_OFF;
-        KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);
-    }
 
     /* Status = TRUE while NC reports axis is in Standstill or above */
     MC_AXIS_STATE st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
