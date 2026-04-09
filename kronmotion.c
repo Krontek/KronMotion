@@ -59,6 +59,11 @@ void MC_Power_Call(MC_Power *inst, AXIS_REF *axis)
     /* MC_Power has no Busy field — check axis pointer manually */
     if (!axis) { inst->Error = true; inst->ErrorID = _MC_ERR_PARAM; return; }
 
+    /* Synchronously mirror Enable into PowerEnabled so motion FBs see it
+     * in the SAME slow-task cycle — avoids ContinuousUpdate overwriting
+     * a pending POWER_OFF command before NC can latch it. */
+    axis->PowerEnabled = inst->Enable;
+
     bool rising  = inst->Enable  && !inst->_prevEnable;
     bool falling = !inst->Enable &&  inst->_prevEnable;
     inst->_prevEnable = inst->Enable;
@@ -130,9 +135,8 @@ void MC_Home_Call(MC_Home *inst, AXIS_REF *axis)
 
     if (!inst->Busy) return;
 
-    /* Abort if axis lost power */
-    MC_AXIS_STATE hs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (hs == MC_AXIS_DISABLED) {
+    /* Abort if axis lost power (synchronous check — immediate in same cycle) */
+    if (!axis->PowerEnabled) {
         inst->Busy           = false;
         inst->Active         = false;
         inst->CommandAborted = true;
@@ -195,8 +199,7 @@ void MC_Stop_Call(MC_Stop *inst, AXIS_REF *axis)
     if (!inst->Busy) return;
 
     /* Abort if axis lost power */
-    MC_AXIS_STATE ss = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (ss == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Done = false;
         inst->Busy = false;
         return;
@@ -253,8 +256,7 @@ void MC_Halt_Call(MC_Halt *inst, AXIS_REF *axis)
     if (!inst->Busy) return;
 
     /* Abort if axis lost power */
-    MC_AXIS_STATE hts = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (hts == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Busy           = false;
         inst->Active         = false;
         inst->CommandAborted = true;
@@ -334,8 +336,7 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
 
     /* ContinuousUpdate: republish while Busy — skip if axis lost power */
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+        if (axis->PowerEnabled) {
             _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                               inst->Position, inst->Velocity,
                               inst->Acceleration, inst->Deceleration, inst->Jerk);
@@ -345,8 +346,7 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
     if (!inst->Busy) return;
 
     /* Abort if axis lost power */
-    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (bs == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Busy           = false;
         inst->Active         = false;
         inst->CommandAborted = true;
@@ -422,8 +422,7 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+        if (axis->PowerEnabled) {
             _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
                               inst->_targetPosition, inst->Velocity,
                               inst->Acceleration, inst->Deceleration, inst->Jerk);
@@ -432,8 +431,7 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
 
     if (!inst->Busy) return;
 
-    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (bs == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Busy           = false;
         inst->Active         = false;
         inst->CommandAborted = true;
@@ -509,8 +507,7 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+        if (axis->PowerEnabled) {
             _axis_publish_cmd(axis, NC_CMD_MOVE_ADD,
                               inst->_targetPosition, inst->Velocity,
                               inst->Acceleration, inst->Deceleration, inst->Jerk);
@@ -519,8 +516,7 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
 
     if (!inst->Busy) return;
 
-    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (bs == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Busy           = false;
         inst->Active         = false;
         inst->CommandAborted = true;
@@ -725,8 +721,7 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+        if (axis->PowerEnabled) {
             float vel = inst->Velocity;
             if (inst->Direction == mcNegativeDirection) vel = -vel;
             _axis_publish_cmd(axis, NC_CMD_MOVE_VEL,
@@ -737,8 +732,7 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
 
     if (!inst->Busy) return;
 
-    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (bs == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Busy           = false;
         inst->Active         = false;
         inst->InVelocity     = false;
@@ -818,8 +812,7 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+        if (axis->PowerEnabled) {
             _axis_publish_cmd(axis, NC_CMD_MOVE_ABS,
                               inst->Position, inst->Velocity,
                               inst->Acceleration, inst->Deceleration, inst->Jerk);
@@ -828,8 +821,7 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
 
     if (!inst->Busy) return;
 
-    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (bs == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Busy = false; inst->Active = false; inst->CommandAborted = true;
         return;
     }
@@ -891,8 +883,7 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
     }
 
     if (inst->Busy && inst->ContinuousUpdate && inst->Execute) {
-        MC_AXIS_STATE cu_st = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-        if (cu_st != MC_AXIS_DISABLED && cu_st != MC_AXIS_ERRORSTOP) {
+        if (axis->PowerEnabled) {
             _axis_publish_cmd(axis, NC_CMD_MOVE_REL,
                               inst->_targetPosition, inst->Velocity,
                               inst->Acceleration, inst->Deceleration, inst->Jerk);
@@ -901,8 +892,7 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
 
     if (!inst->Busy) return;
 
-    MC_AXIS_STATE bs = KRON_LOAD_ACQ_U16((volatile uint16_t *)&axis->sts_State);
-    if (bs == MC_AXIS_DISABLED) {
+    if (!axis->PowerEnabled) {
         inst->Busy = false; inst->Active = false; inst->CommandAborted = true;
         return;
     }

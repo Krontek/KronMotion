@@ -107,6 +107,11 @@ typedef struct {
     float             GearRatio;         /* User units per motor rev (e.g. 5 = 1 rev → 5 mm) */
     KRON_ENCODER_TYPE EncoderType;       /* Feedback encoder type             */
 
+    /* ── Power state (written synchronously by MC_Power in Slow Task) ──── */
+    bool              PowerEnabled;       /* MC_Power sets this = Enable each cycle.
+                                           * Motion FBs check before ContinuousUpdate
+                                           * to avoid overwriting a pending POWER_OFF. */
+
     /* ── Axis-level status (written by NC) ──────────────────────────────── */
     bool              IsHomed;
     bool              AxisWarning;
