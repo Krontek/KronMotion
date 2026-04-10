@@ -112,6 +112,7 @@ static bool _nc_latch_cmd(NC_AXIS *nc)
     nc->priv.dec         = ref->cmd_Decel;
     nc->priv.jerk        = ref->cmd_Jerk;
     nc->priv.in_velocity = false;
+    nc->priv.cruise_ramp_down = false;
 
     /* Acknowledge: NC has latched the command */
     KRON_STORE_REL_U16(&ref->sts_AckSeq, cur_seq);
@@ -517,19 +518,50 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
 
     /*--- S-curve position mode ---*/
 
-    /* Handle wrong-direction velocity: must decelerate first.
-     * Cap at min(dec, acc) so there's no discontinuity when vel crosses
-     * zero and the normal branch takes over (which clamps to acc).
+    /* Handle wrong-direction velocity: decelerate to zero using proper
+     * ramp-in / ramp-out logic (mirrors _nc_decel_to_zero).
      *
-     * Also cap so that when vel crosses zero, the acc ramp-down to zero
-     * doesn't overshoot v_max.  Ramp-down from a to 0 adds dv = a²/(2j)
-     * velocity.  Need: a ≤ sqrt(2 · j · v_max). */
+     * Cap acc limit at min(dec, acc) for continuity when vel crosses zero,
+     * and also at sqrt(2·j·v_max) so the ramp-down after zero-crossing
+     * doesn't overshoot v_max.
+     *
+     * Inherited acc from a previous command is clamped to ±dec to prevent
+     * velocity from running away when the new command has lower limits. */
     if (vel < -_NC_VEL_EPS) {
         float limit = _NC_FMIN(p->dec, p->acc);
         float vmax_limit = _nc_fsqrt(2.0f * j * p->v_max);
         limit = _NC_FMIN(limit, vmax_limit);
-        float new_acc = acc + j * dt;
-        if (new_acc > limit) new_acc = limit;
+
+        /* Ramp inherited wrong-direction acc toward limits using jerk,
+         * rather than hard-clamping (which causes acc discontinuity when
+         * dir flips at overshoot and inherited acc far exceeds limit). */
+
+        float abs_vel = -vel;  /* positive magnitude */
+        float a_decel = (acc > 0.0f) ? acc : 0.0f;
+        float dv_ramp_out = (a_decel * a_decel) / (2.0f * j);
+
+        float new_acc;
+        if (acc > limit + _NC_VEL_EPS) {
+            /* Inherited acc above limit — ramp down toward limit.
+             * This occurs after dir flip at overshoot: the old decel acc
+             * appears as a large positive acc in the new frame. */
+            new_acc = acc - j * dt;
+            if (new_acc < limit) new_acc = limit;
+        } else if (acc < -(p->dec + _NC_VEL_EPS)) {
+            /* Inherited negative acc below -dec — ramp up toward -dec */
+            new_acc = acc + j * dt;
+            if (new_acc > -p->dec) new_acc = -p->dec;
+        } else if (a_decel > _NC_VEL_EPS &&
+                   abs_vel <= dv_ramp_out + _NC_VEL_EPS * 2.0f) {
+            /* Ramp-out: reduce deceleration to arrive at vel=0 smoothly */
+            new_acc = acc - j * dt;
+            if (new_acc < 0.0f) new_acc = 0.0f;
+        } else {
+            /* Ramp-in: build deceleration (positive acc opposes negative vel) */
+            new_acc = acc + j * dt;
+            if (new_acc > limit) new_acc = limit;
+        }
+
         float nv = (vel + new_acc * dt) * dir;
         p->cmd_pos += 0.5f * (p->cmd_vel + nv) * dt;
         p->cmd_vel = nv;
@@ -541,9 +573,18 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
     float abs_vel = _NC_FMAX(vel, 0.0f);
 
     /* Compute stopping distance from current state.
-     * Pass signed acc so the estimate accounts for existing deceleration.
-     * Add small margin to compensate for discrete-time integration error. */
-    float stop_dist = _nc_stopping_distance(abs_vel, acc, p->dec, j);
+     *
+     * For the zone boundary decision, use max(acc, 0): don't give "credit"
+     * for deceleration already in progress.  Without this, small negative
+     * acc reduces the stopping estimate, the system exits decel zone into
+     * accel zone, acc ramps back to 0, stopping estimate rises, re-enters
+     * decel zone → oscillation around acc=0 at the boundary.
+     *
+     * Using max(acc, 0) makes the boundary monotonic: once we commit to
+     * braking, the estimate stays conservative and the decel zone logic
+     * (ramp-in / ramp-out) handles the actual profile internally. */
+    float acc_for_boundary = _NC_FMAX(acc, 0.0f);
+    float stop_dist = _nc_stopping_distance(abs_vel, acc_for_boundary, p->dec, j);
     stop_dist += abs_vel * dt * 3.0f;  /* ~3 cycle margin */
 
     float new_acc_dir;  /* acceleration in direction of motion */
@@ -604,7 +645,6 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
                 new_acc_dir = acc - j * dt;
                 if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
             } else if (acc < -_NC_VEL_EPS) {
-                /* Negative acc (from above-v_max decel): ramp up to 0 */
                 new_acc_dir = acc + j * dt;
                 if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
             } else {
@@ -616,20 +656,48 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
                 /* Negative acc (from above-v_max decel): ramp toward 0 first */
                 new_acc_dir = acc + j * dt;
                 if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
+                p->cruise_ramp_down = false;
             } else {
-                /* Normal acceleration toward v_max */
-                new_acc_dir = acc + j * dt;
-                if (new_acc_dir > p->acc) new_acc_dir = p->acc;
-
-                /* Don't overshoot v_max — check if we need to ramp down acc */
+                /* Committed ramp-down for cruise entry.
+                 *
+                 * Once we detect that the velocity headroom to v_max is less
+                 * than the distance needed to ramp acc down to zero, we SET
+                 * cruise_ramp_down and STAY committed until acc reaches 0.
+                 *
+                 * Without commitment the condition can flip each cycle:
+                 * dv_ramp_down shrinks by ~j·dt² per step (acc decreasing)
+                 * while vel_headroom shrinks by ~acc·dt, so the inequality
+                 * alternates, causing acc jitter (ACC_DISCONTINUITY). */
                 float vel_headroom = p->v_max - abs_vel;
-                float dv_ramp_down = (new_acc_dir * new_acc_dir) / (2.0f * j);
-                if (vel_headroom <= dv_ramp_down + _NC_VEL_EPS) {
+                float dv_ramp_down = (acc > _NC_VEL_EPS)
+                    ? (acc * acc) / (2.0f * j) + acc * dt * 0.5f
+                    : 0.0f;
+
+                if (!p->cruise_ramp_down &&
+                    vel_headroom <= dv_ramp_down + _NC_VEL_EPS) {
+                    p->cruise_ramp_down = true;
+                }
+
+                if (p->cruise_ramp_down) {
                     new_acc_dir = acc - j * dt;
-                    if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+                    if (new_acc_dir < 0.0f) {
+                        new_acc_dir = 0.0f;
+                        p->cruise_ramp_down = false;
+                    }
+                } else {
+                    new_acc_dir = acc + j * dt;
+                    if (new_acc_dir > p->acc) new_acc_dir = p->acc;
                 }
             }
         }
+
+        /* No hard velocity clamp at v_max.
+         *
+         * The committed ramp-down (cruise_ramp_down flag) anticipates
+         * v_max approach and smoothly ramps acc to zero.  If a small
+         * overshoot still occurs (within ~j·dt² per cycle), the
+         * "at cruise" and "above v_max" branches handle it with
+         * jerk-limited transitions — no discontinuity. */
     }
 
     /* ── Integrate state ──────────────────────────────────────────────── */
@@ -641,21 +709,21 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
      * Small temporary overshoot during cruise entry is normal S-curve
      * behavior (vel settles to v_max as acc ramps to 0). */
 
-    /* Ensure velocity doesn't reverse past zero while decelerating */
+    /* Ensure velocity doesn't reverse past zero while decelerating.
+     * Compute the exact acc to bring vel to zero rather than hard-zeroing
+     * both vel and acc — this avoids an acc discontinuity at standstill. */
     if (vel >= 0.0f && new_vel * dir < -_NC_VEL_EPS) {
         new_vel = 0.0f;
-        real_acc = 0.0f;
+        real_acc = -p->cmd_vel / (dt + 1e-12f);
     }
 
     float new_pos = p->cmd_pos + 0.5f * (p->cmd_vel + new_vel) * dt;
 
-    /* Overshoot clamp */
-    if (dir > 0.0f && new_pos > p->target_pos) {
-        new_pos = p->target_pos; new_vel = 0.0f; real_acc = 0.0f;
-    }
-    if (dir < 0.0f && new_pos < p->target_pos) {
-        new_pos = p->target_pos; new_vel = 0.0f; real_acc = 0.0f;
-    }
+    /* No hard overshoot clamp — if the axis cannot decelerate in time
+     * (e.g. high velocity + close target), let it overshoot naturally.
+     * Next cycle, remaining flips sign and the wrong-direction branch
+     * brings the axis back smoothly.  A hard clamp here would zero
+     * velocity instantaneously, creating a velocity discontinuity. */
 
     p->cmd_acc = real_acc;
     p->cmd_vel = new_vel;

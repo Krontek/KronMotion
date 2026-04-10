@@ -565,13 +565,14 @@ static void nc_thread_func(NC_AXIS *nc, PlotData *plot, float dt,
         float pos = nc->ref->CommandedPosition;
         float vel = nc->ref->CommandedVelocity;
         float acc = nc->priv.cmd_acc;
-        /* anomaly check with command cache (updates suppress_cycles) */
-        check_anomalies(plot, nc, dt, *ap, cc, *log, *log_mtx);
 
-        /* Numerical jerk — suppress spikes during command transitions */
+        /* Numerical jerk — compute BEFORE check_anomalies which overwrites prev_acc */
         float jrk = 0.0f;
         if (plot->t_elapsed > dt && cc.suppress_cycles == 0)
             jrk = (acc - plot->prev_acc) / dt;
+
+        /* anomaly check with command cache (updates suppress_cycles, prev_acc) */
+        check_anomalies(plot, nc, dt, *ap, cc, *log, *log_mtx);
 
         /* position settling check: discrete motion -> standstill
          * Uses cached target (not g_target_pos) to avoid race with random thread */
@@ -830,9 +831,101 @@ int main()
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImPlot::CreateContext();
-    ImGui::StyleColorsDark();
     ImGui_ImplGlfw_InitForOpenGL(window, true);
     ImGui_ImplOpenGL3_Init("#version 150");
+
+    /* ── Modern Dark Theme ─────────────────────────────────────────────── */
+    {
+        ImGuiStyle &s = ImGui::GetStyle();
+        s.WindowRounding    = 0.0f;
+        s.ChildRounding     = 6.0f;
+        s.FrameRounding     = 4.0f;
+        s.GrabRounding      = 4.0f;
+        s.PopupRounding     = 6.0f;
+        s.ScrollbarRounding = 4.0f;
+        s.TabRounding       = 4.0f;
+        s.FramePadding      = ImVec2(8, 5);
+        s.ItemSpacing       = ImVec2(8, 6);
+        s.WindowPadding     = ImVec2(12, 12);
+        s.IndentSpacing     = 16.0f;
+        s.ScrollbarSize     = 12.0f;
+        s.GrabMinSize       = 10.0f;
+        s.WindowBorderSize  = 0.0f;
+        s.ChildBorderSize   = 1.0f;
+        s.SeparatorTextBorderSize = 2.0f;
+
+        ImVec4 *c = s.Colors;
+        /* Background */
+        c[ImGuiCol_WindowBg]        = ImVec4(0.098f, 0.098f, 0.118f, 1.00f);
+        c[ImGuiCol_ChildBg]         = ImVec4(0.118f, 0.118f, 0.141f, 1.00f);
+        c[ImGuiCol_PopupBg]         = ImVec4(0.118f, 0.118f, 0.141f, 0.96f);
+        /* Borders */
+        c[ImGuiCol_Border]          = ImVec4(0.220f, 0.220f, 0.280f, 0.60f);
+        c[ImGuiCol_BorderShadow]    = ImVec4(0.000f, 0.000f, 0.000f, 0.00f);
+        /* Frame */
+        c[ImGuiCol_FrameBg]         = ImVec4(0.157f, 0.157f, 0.192f, 1.00f);
+        c[ImGuiCol_FrameBgHovered]  = ImVec4(0.200f, 0.200f, 0.250f, 1.00f);
+        c[ImGuiCol_FrameBgActive]   = ImVec4(0.240f, 0.240f, 0.300f, 1.00f);
+        /* Title */
+        c[ImGuiCol_TitleBg]         = ImVec4(0.075f, 0.075f, 0.098f, 1.00f);
+        c[ImGuiCol_TitleBgActive]   = ImVec4(0.098f, 0.098f, 0.118f, 1.00f);
+        c[ImGuiCol_TitleBgCollapsed]= ImVec4(0.075f, 0.075f, 0.098f, 0.75f);
+        /* Tabs */
+        c[ImGuiCol_Tab]             = ImVec4(0.157f, 0.157f, 0.192f, 1.00f);
+        c[ImGuiCol_TabHovered]      = ImVec4(0.275f, 0.380f, 0.580f, 1.00f);
+        c[ImGuiCol_TabSelected]     = ImVec4(0.220f, 0.310f, 0.500f, 1.00f);
+        /* Button — neutral blue-grey */
+        c[ImGuiCol_Button]          = ImVec4(0.200f, 0.220f, 0.290f, 1.00f);
+        c[ImGuiCol_ButtonHovered]   = ImVec4(0.275f, 0.310f, 0.420f, 1.00f);
+        c[ImGuiCol_ButtonActive]    = ImVec4(0.340f, 0.380f, 0.520f, 1.00f);
+        /* Header (collapsing header, tree node) */
+        c[ImGuiCol_Header]          = ImVec4(0.200f, 0.220f, 0.290f, 0.60f);
+        c[ImGuiCol_HeaderHovered]   = ImVec4(0.275f, 0.310f, 0.420f, 0.80f);
+        c[ImGuiCol_HeaderActive]    = ImVec4(0.340f, 0.380f, 0.520f, 1.00f);
+        /* Separator */
+        c[ImGuiCol_Separator]       = ImVec4(0.220f, 0.220f, 0.280f, 0.60f);
+        c[ImGuiCol_SeparatorHovered]= ImVec4(0.400f, 0.440f, 0.600f, 0.80f);
+        c[ImGuiCol_SeparatorActive] = ImVec4(0.500f, 0.540f, 0.700f, 1.00f);
+        /* Scrollbar */
+        c[ImGuiCol_ScrollbarBg]     = ImVec4(0.098f, 0.098f, 0.118f, 0.50f);
+        c[ImGuiCol_ScrollbarGrab]   = ImVec4(0.300f, 0.300f, 0.380f, 0.80f);
+        c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.400f, 0.400f, 0.500f, 0.80f);
+        c[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.500f, 0.500f, 0.600f, 1.00f);
+        /* Slider / Drag */
+        c[ImGuiCol_SliderGrab]      = ImVec4(0.380f, 0.480f, 0.700f, 1.00f);
+        c[ImGuiCol_SliderGrabActive]= ImVec4(0.480f, 0.580f, 0.800f, 1.00f);
+        /* Check / Radio */
+        c[ImGuiCol_CheckMark]       = ImVec4(0.400f, 0.700f, 1.000f, 1.00f);
+        /* Text */
+        c[ImGuiCol_Text]            = ImVec4(0.860f, 0.870f, 0.900f, 1.00f);
+        c[ImGuiCol_TextDisabled]    = ImVec4(0.460f, 0.470f, 0.510f, 1.00f);
+        /* Resize grip */
+        c[ImGuiCol_ResizeGrip]      = ImVec4(0.275f, 0.380f, 0.580f, 0.25f);
+        c[ImGuiCol_ResizeGripHovered]= ImVec4(0.275f, 0.380f, 0.580f, 0.60f);
+        c[ImGuiCol_ResizeGripActive] = ImVec4(0.275f, 0.380f, 0.580f, 0.90f);
+        /* Plot (ImGui side) */
+        c[ImGuiCol_PlotLines]       = ImVec4(0.400f, 0.700f, 1.000f, 1.00f);
+        c[ImGuiCol_PlotHistogram]   = ImVec4(0.400f, 0.700f, 1.000f, 1.00f);
+    }
+
+    /* ── ImPlot theme ──────────────────────────────────────────────────── */
+    {
+        ImPlotStyle &ps = ImPlot::GetStyle();
+        ps.LineWeight       = 1.8f;
+        ps.PlotPadding      = ImVec2(10, 10);
+        ps.LabelPadding     = ImVec2(4, 3);
+        ps.FitPadding       = ImVec2(0.05f, 0.05f);
+        ps.PlotBorderSize   = 0.0f;
+
+        ImVec4 *pc = ps.Colors;
+        pc[ImPlotCol_PlotBg]    = ImVec4(0.075f, 0.075f, 0.098f, 1.0f);
+        pc[ImPlotCol_PlotBorder]= ImVec4(0.200f, 0.200f, 0.260f, 0.4f);
+        pc[ImPlotCol_AxisGrid]  = ImVec4(0.200f, 0.200f, 0.260f, 0.3f);
+        pc[ImPlotCol_AxisText]  = ImVec4(0.580f, 0.590f, 0.640f, 1.0f);
+        pc[ImPlotCol_LegendBg]  = ImVec4(0.098f, 0.098f, 0.118f, 0.85f);
+        pc[ImPlotCol_LegendBorder] = ImVec4(0.200f, 0.200f, 0.260f, 0.5f);
+        pc[ImPlotCol_LegendText]   = ImVec4(0.750f, 0.760f, 0.800f, 1.0f);
+    }
 
     /* ── Init KronMotion - bypass MC layer entirely ─────────────────────── */
     memset(&Kron_PI, 0, sizeof(Kron_PI));
@@ -928,39 +1021,105 @@ int main()
          * ================================================================ */
         ImGui::SetNextWindowPos(ImVec2(0, 0));
         ImGui::SetNextWindowSize(ImVec2(panel_w, (float)win_h));
-        ImGui::Begin("Control", nullptr,
+        ImGui::Begin("##LeftPanel", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoCollapse);
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
-        /* ── Live Status ────────────────────────────────────────────────── */
-        ImGui::SeparatorText("Status");
-        ImGui::Text("State:    %s", axis_state_name(axis_ref.sts_State));
-        ImGui::Text("Position: %.4f", axis_ref.CommandedPosition);
-        ImGui::Text("Velocity: %.4f", axis_ref.CommandedVelocity);
-        ImGui::Text("Accel:    %.4f", nc_axis.priv.cmd_acc);
+        /* ── Header ────────────────────────────────────────────────────── */
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.400f, 0.700f, 1.000f, 1.0f));
+        ImGui::Text("KRONMOTION");
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::TextDisabled("Analysis Tool");
+        ImGui::Spacing();
 
-        /* ── Active NC Parameters (latched by NC engine, updated by random) */
-        ImGui::SeparatorText("Active Profile");
-        ImGui::Text("Target:   %.2f", nc_axis.priv.target_pos);
-        ImGui::Text("V_max:    %.2f", nc_axis.priv.v_max);
-        ImGui::Text("Acc:      %.2f", nc_axis.priv.acc);
-        ImGui::Text("Dec:      %.2f", nc_axis.priv.dec);
-        ImGui::Text("Jerk:     %.0f", nc_axis.priv.jerk);
-
-        /* ── Parameters ─────────────────────────────────────────────────── */
-        ImGui::SeparatorText("Manual Parameters");
-        ImGui::InputFloat("Position",     &param_position,     1.0f, 10.0f, "%.1f");
-        ImGui::InputFloat("Velocity",     &param_velocity,     1.0f, 10.0f, "%.1f");
-        ImGui::InputFloat("Acceleration", &param_acceleration, 10.0f, 100.0f, "%.1f");
-        ImGui::InputFloat("Deceleration", &param_deceleration, 10.0f, 100.0f, "%.1f");
-        ImGui::InputFloat("Jerk",         &param_jerk, 100.0f, 1000.0f, "%.0f");
-        ImGui::InputFloat("Vel Target",   &param_vel_target,   1.0f, 10.0f, "%.1f");
-
-        /* ── Manual Commands ────────────────────────────────────────────── */
-        ImGui::SeparatorText("Commands");
         float btn_w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
 
-        if (ImGui::Button("Move Absolute", ImVec2(btn_w, 32))) {
+        /* ── Live Status Card ──────────────────────────────────────────── */
+        ImGui::SeparatorText("Live Status");
+        {
+            /* State indicator with color */
+            MC_AXIS_STATE st = axis_ref.sts_State;
+            ImVec4 state_col;
+            switch (st) {
+            case MC_AXIS_STANDSTILL:          state_col = ImVec4(0.30f, 0.78f, 0.47f, 1.0f); break;
+            case MC_AXIS_DISCRETE_MOTION:     state_col = ImVec4(0.40f, 0.70f, 1.00f, 1.0f); break;
+            case MC_AXIS_CONTINUOUS_MOTION:    state_col = ImVec4(0.55f, 0.80f, 1.00f, 1.0f); break;
+            case MC_AXIS_STOPPING:            state_col = ImVec4(1.00f, 0.75f, 0.30f, 1.0f); break;
+            case MC_AXIS_ERRORSTOP:           state_col = ImVec4(1.00f, 0.35f, 0.35f, 1.0f); break;
+            case MC_AXIS_HOMING:              state_col = ImVec4(0.80f, 0.60f, 1.00f, 1.0f); break;
+            default:                          state_col = ImVec4(0.50f, 0.50f, 0.55f, 1.0f); break;
+            }
+
+            /* Draw colored dot */
+            ImVec2 cursor = ImGui::GetCursorScreenPos();
+            float dot_r = 5.0f;
+            ImGui::GetWindowDrawList()->AddCircleFilled(
+                ImVec2(cursor.x + dot_r + 2, cursor.y + ImGui::GetTextLineHeight() * 0.5f),
+                dot_r, ImGui::ColorConvertFloat4ToU32(state_col));
+            ImGui::Indent(dot_r * 2 + 8);
+            ImGui::PushStyleColor(ImGuiCol_Text, state_col);
+            ImGui::Text("%s", axis_state_name(st));
+            ImGui::PopStyleColor();
+            ImGui::Unindent(dot_r * 2 + 8);
+
+            /* Values in two columns */
+            ImGui::BeginChild("StatusValues", ImVec2(0, 68), ImGuiChildFlags_None);
+            float col_w = ImGui::GetContentRegionAvail().x * 0.5f;
+
+            ImGui::TextDisabled("Position");
+            ImGui::SameLine(col_w);
+            ImGui::TextDisabled("Velocity");
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.95f, 0.97f, 1.0f));
+            ImGui::Text("%.4f", axis_ref.CommandedPosition);
+            ImGui::SameLine(col_w);
+            ImGui::Text("%.4f", axis_ref.CommandedVelocity);
+            ImGui::PopStyleColor();
+
+            ImGui::TextDisabled("Acceleration");
+            ImGui::SameLine(col_w);
+            ImGui::TextDisabled("Target");
+
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.95f, 0.97f, 1.0f));
+            ImGui::Text("%.4f", nc_axis.priv.cmd_acc);
+            ImGui::SameLine(col_w);
+            ImGui::Text("%.2f", nc_axis.priv.target_pos);
+            ImGui::PopStyleColor();
+            ImGui::EndChild();
+
+            /* Active profile — compact */
+            ImGui::TextDisabled("Profile: V=%.1f  A=%.1f  D=%.1f  J=%.0f",
+                nc_axis.priv.v_max, nc_axis.priv.acc,
+                nc_axis.priv.dec, nc_axis.priv.jerk);
+        }
+
+        /* ── Parameters ─────────────────────────────────────────────────── */
+        ImGui::SeparatorText("Parameters");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::DragFloat("##Position",     &param_position,     0.5f, -1000, 1000, "Position: %.1f");
+        float half_w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) * 0.5f;
+        ImGui::SetNextItemWidth(half_w);
+        ImGui::DragFloat("##Velocity",     &param_velocity,     0.5f, 0, 1000, "Vel: %.1f");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(half_w);
+        ImGui::DragFloat("##VelTarget",    &param_vel_target,   0.5f, -1000, 1000, "VelTgt: %.1f");
+        ImGui::SetNextItemWidth(half_w);
+        ImGui::DragFloat("##Acceleration", &param_acceleration, 1.0f, 0, 5000, "Acc: %.1f");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(half_w);
+        ImGui::DragFloat("##Deceleration", &param_deceleration, 1.0f, 0, 5000, "Dec: %.1f");
+        ImGui::SetNextItemWidth(-1);
+        ImGui::DragFloat("##Jerk",         &param_jerk,         10.0f, 0, 50000, "Jerk: %.0f");
+
+        /* ── Commands ───────────────────────────────────────────────────── */
+        ImGui::SeparatorText("Commands");
+
+        /* Blue for position commands */
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.180f, 0.280f, 0.480f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.240f, 0.360f, 0.580f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.300f, 0.420f, 0.660f, 1.0f));
+        if (ImGui::Button("Move Absolute", ImVec2(btn_w, 30))) {
             g_target_pos.store(param_position);
             g_max_vel.store(param_velocity);
             g_max_acc.store(param_acceleration);
@@ -970,7 +1129,7 @@ int main()
                         param_acceleration, param_deceleration, param_jerk);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Move Relative", ImVec2(btn_w, 32))) {
+        if (ImGui::Button("Move Relative", ImVec2(btn_w, 30))) {
             float target = axis_ref.CommandedPosition + param_position;
             g_target_pos.store(target);
             g_max_vel.store(param_velocity);
@@ -980,8 +1139,13 @@ int main()
                         param_position, param_velocity,
                         param_acceleration, param_deceleration, param_jerk);
         }
+        ImGui::PopStyleColor(3);
 
-        if (ImGui::Button("Move Velocity", ImVec2(btn_w, 32))) {
+        /* Teal for velocity */
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.130f, 0.320f, 0.360f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.180f, 0.420f, 0.460f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.220f, 0.500f, 0.540f, 1.0f));
+        if (ImGui::Button("Move Velocity", ImVec2(btn_w, 30))) {
             g_max_vel.store(std::fabs(param_vel_target));
             g_max_acc.store(param_acceleration);
             g_max_dec.store(param_deceleration);
@@ -989,12 +1153,19 @@ int main()
                         0.0f, param_vel_target,
                         param_acceleration, param_deceleration, param_jerk);
         }
+        ImGui::PopStyleColor(3);
         ImGui::SameLine();
-        if (ImGui::Button("Halt", ImVec2(btn_w, 32))) {
+
+        /* Amber for halt */
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.420f, 0.320f, 0.120f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.540f, 0.420f, 0.160f, 1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.640f, 0.500f, 0.200f, 1.0f));
+        if (ImGui::Button("Halt", ImVec2(btn_w, 30))) {
             publish_cmd(&axis_ref, NC_CMD_HALT,
                         0.0f, 0.0f,
                         param_acceleration, param_deceleration, param_jerk);
         }
+        ImGui::PopStyleColor(3);
 
         /* ── Random Excitation ──────────────────────────────────────────── */
         ImGui::SeparatorText("Random Excitation");
@@ -1002,10 +1173,22 @@ int main()
         bool rp = g_random_pos.load();
         bool rv = g_random_vel.load();
 
-        if (rp) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
-        if (ImGui::Button(rp ? "Random Pos: ON" : "Random Pos: OFF", ImVec2(btn_w, 32))) {
+        /* Green toggle style */
+        auto push_toggle_style = [](bool active) {
+            if (active) {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.15f, 0.55f, 0.30f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.20f, 0.65f, 0.35f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.25f, 0.75f, 0.40f, 1.0f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(0.22f, 0.22f, 0.28f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonHovered,  ImVec4(0.28f, 0.28f, 0.35f, 1.0f));
+                ImGui::PushStyleColor(ImGuiCol_ButtonActive,   ImVec4(0.35f, 0.35f, 0.42f, 1.0f));
+            }
+        };
+
+        push_toggle_style(rp);
+        if (ImGui::Button(rp ? "Rnd Pos: ON" : "Rnd Pos: OFF", ImVec2(btn_w, 30))) {
             if (rp) {
-                /* turning OFF -> save log */
                 std::lock_guard<std::mutex> lk(log_mtx);
                 std::string path = save_log(log_entries, plot, "tool");
                 if (!path.empty())
@@ -1014,14 +1197,13 @@ int main()
             }
             g_random_pos.store(!rp);
         }
-        if (rp) ImGui::PopStyleColor();
+        ImGui::PopStyleColor(3);
 
         ImGui::SameLine();
 
-        if (rv) ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.7f, 0.2f, 1.0f));
-        if (ImGui::Button(rv ? "Random Vel: ON" : "Random Vel: OFF", ImVec2(btn_w, 32))) {
+        push_toggle_style(rv);
+        if (ImGui::Button(rv ? "Rnd Vel: ON" : "Rnd Vel: OFF", ImVec2(btn_w, 30))) {
             if (rv) {
-                /* turning OFF -> save log */
                 std::lock_guard<std::mutex> lk(log_mtx);
                 std::string path = save_log(log_entries, plot, "tool");
                 if (!path.empty())
@@ -1030,7 +1212,7 @@ int main()
             }
             g_random_vel.store(!rv);
         }
-        if (rv) ImGui::PopStyleColor();
+        ImGui::PopStyleColor(3);
 
         if (ImGui::TreeNode("Random Settings")) {
             ImGui::DragFloatRange2("Pos Range", &rparams.pos_min, &rparams.pos_max, 1.0f, -1000, 1000);
@@ -1042,38 +1224,36 @@ int main()
             ImGui::TreePop();
         }
 
-        /* ── Analysis Thresholds ────────────────────────────────────────── */
-        ImGui::SeparatorText("Analysis");
-        if (ImGui::TreeNode("Thresholds")) {
-            ImGui::InputFloat("Vel disc.", &analysis.vel_disc_threshold, 0.01f, 0.1f, "%.3f");
-            ImGui::InputFloat("Acc disc.", &analysis.acc_disc_threshold, 0.1f, 1.0f, "%.2f");
-            ImGui::InputFloat("Vel overshoot %%", &analysis.vel_overshoot_pct, 0.1f, 1.0f, "%.1f");
-            ImGui::InputFloat("Acc overshoot %%", &analysis.acc_overshoot_pct, 0.1f, 1.0f, "%.1f");
-            ImGui::InputFloat("Pos overshoot [u]", &analysis.pos_overshoot_abs, 0.001f, 0.01f, "%.4f");
+        /* ── Settings (collapsible) ─────────────────────────────────────── */
+        ImGui::SeparatorText("Settings");
+        if (ImGui::TreeNode("Analysis Thresholds")) {
+            ImGui::DragFloat("Vel disc.",       &analysis.vel_disc_threshold, 0.01f, 0, 10, "%.3f");
+            ImGui::DragFloat("Acc disc.",       &analysis.acc_disc_threshold, 0.1f, 0, 50, "%.2f");
+            ImGui::DragFloat("Vel overshoot %%", &analysis.vel_overshoot_pct, 0.1f, 0, 50, "%.1f");
+            ImGui::DragFloat("Acc overshoot %%", &analysis.acc_overshoot_pct, 0.1f, 0, 50, "%.1f");
+            ImGui::DragFloat("Pos overshoot",   &analysis.pos_overshoot_abs, 0.001f, 0, 1, "%.4f");
             float ptol = g_pos_tolerance.load();
-            if (ImGui::InputFloat("Pos settle tol", &ptol, 0.001f, 0.01f, "%.4f"))
+            if (ImGui::DragFloat("Pos settle tol", &ptol, 0.001f, 0, 1, "%.4f"))
                 g_pos_tolerance.store(ptol);
             ImGui::TreePop();
         }
 
-        /* ── Plot Settings ──────────────────────────────────────────────── */
-        ImGui::SeparatorText("Plot");
-        ImGui::SliderFloat("Window (s)", &plot_window, 1.0f, 60.0f, "%.0f");
-        if (ImGui::Button("Clear Plot & Log", ImVec2(-1, 0))) {
+        /* ── Plot Controls ──────────────────────────────────────────────── */
+        ImGui::SliderFloat("Window (s)", &plot_window, 1.0f, 60.0f, "%.0f s");
+        if (ImGui::Button("Clear All", ImVec2(-1, 28))) {
             plot.clear();
             std::lock_guard<std::mutex> lk(log_mtx);
             log_entries.clear();
         }
 
         /* ── Log ────────────────────────────────────────────────────────── */
-        ImGui::SeparatorText("Log");
+        ImGui::SeparatorText("Event Log");
         static bool show_only_errors = true;
-        ImGui::Checkbox("Errors only", &show_only_errors);
+        ImGui::Checkbox("Anomalies only", &show_only_errors);
         {
             float log_h = ImGui::GetContentRegionAvail().y;
             ImGui::BeginChild("LogScroll", ImVec2(0, log_h), ImGuiChildFlags_Borders);
             std::lock_guard<std::mutex> lk(log_mtx);
-            /* trim old */
             while ((int)log_entries.size() > MAX_LOG)
                 log_entries.pop_front();
             for (auto &e : log_entries) {
@@ -1081,6 +1261,7 @@ int main()
                 ImGui::PushStyleColor(ImGuiCol_Text, e.color);
                 ImGui::TextWrapped("%s", e.msg.c_str());
                 ImGui::PopStyleColor();
+                ImGui::Spacing();
             }
             if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY() - 20.0f)
                 ImGui::SetScrollHereY(1.0f);
@@ -1094,9 +1275,9 @@ int main()
          * ================================================================ */
         ImGui::SetNextWindowPos(ImVec2(panel_w, 0));
         ImGui::SetNextWindowSize(ImVec2((float)win_w - panel_w, (float)win_h));
-        ImGui::Begin("Plots", nullptr,
+        ImGui::Begin("##Plots", nullptr,
             ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-            ImGuiWindowFlags_NoCollapse);
+            ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoTitleBar);
 
         float plot_h = (ImGui::GetContentRegionAvail().y - ImGui::GetStyle().ItemSpacing.y) / 2.0f;
         float plot_w = (ImGui::GetContentRegionAvail().x - ImGui::GetStyle().ItemSpacing.x) / 2.0f;
@@ -1152,15 +1333,24 @@ int main()
         float mv  = g_max_vel.load();
         float ma  = g_max_acc.load();
 
+        /* Plot line colors */
+        ImVec4 col_pos  = ImVec4(0.30f, 0.78f, 0.47f, 1.0f);  /* green */
+        ImVec4 col_vel  = ImVec4(0.40f, 0.70f, 1.00f, 1.0f);  /* blue  */
+        ImVec4 col_acc  = ImVec4(1.00f, 0.65f, 0.30f, 1.0f);  /* orange */
+        ImVec4 col_jrk  = ImVec4(0.80f, 0.50f, 1.00f, 1.0f);  /* purple */
+        ImVec4 col_ref  = ImVec4(1.00f, 0.35f, 0.40f, 0.50f); /* red ref */
+
         /* ── Row 1: Position | Acceleration ─────────────────────────────── */
         calc_limits(p_s, std::fmin(0.0f, tgt), std::fmax(0.0f, tgt), y_lo, y_hi);
         if (ImPlot::BeginPlot("Position", ImVec2(plot_w, plot_h))) {
             ImPlot::SetupAxes("Time (s)", "Position (u)");
             ImPlot::SetupAxisLimits(ImAxis_X1, t_min, t_max, ImPlotCond_Always);
             ImPlot::SetupAxisLimits(ImAxis_Y1, y_lo, y_hi, ImPlotCond_Always);
+            ImPlot::PushStyleColor(ImPlotCol_Line, col_pos);
             if (n > 0)
                 ImPlot::PlotLine("Cmd Pos", t_s.data(), p_s.data(), n);
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1, 0.3f, 0.3f, 0.6f));
+            ImPlot::PopStyleColor();
+            ImPlot::PushStyleColor(ImPlotCol_Line, col_ref);
             plot_hline("Target", tgt, t_min, t_max);
             ImPlot::PopStyleColor();
             ImPlot::EndPlot();
@@ -1170,12 +1360,14 @@ int main()
 
         calc_limits(a_s, -ma, ma, y_lo, y_hi);
         if (ImPlot::BeginPlot("Acceleration", ImVec2(plot_w, plot_h))) {
-            ImPlot::SetupAxes("Time (s)", "Accel (u/s^2)");
+            ImPlot::SetupAxes("Time (s)", "Accel (u/s\xc2\xb2)");
             ImPlot::SetupAxisLimits(ImAxis_X1, t_min, t_max, ImPlotCond_Always);
             ImPlot::SetupAxisLimits(ImAxis_Y1, y_lo, y_hi, ImPlotCond_Always);
+            ImPlot::PushStyleColor(ImPlotCol_Line, col_acc);
             if (n > 0)
                 ImPlot::PlotLine("Cmd Acc", t_s.data(), a_s.data(), n);
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1, 0.3f, 0.3f, 0.6f));
+            ImPlot::PopStyleColor();
+            ImPlot::PushStyleColor(ImPlotCol_Line, col_ref);
             plot_hline("+Amax", ma, t_min, t_max);
             plot_hline("-Amax", -ma, t_min, t_max);
             ImPlot::PopStyleColor();
@@ -1188,9 +1380,11 @@ int main()
             ImPlot::SetupAxes("Time (s)", "Velocity (u/s)");
             ImPlot::SetupAxisLimits(ImAxis_X1, t_min, t_max, ImPlotCond_Always);
             ImPlot::SetupAxisLimits(ImAxis_Y1, y_lo, y_hi, ImPlotCond_Always);
+            ImPlot::PushStyleColor(ImPlotCol_Line, col_vel);
             if (n > 0)
                 ImPlot::PlotLine("Cmd Vel", t_s.data(), v_s.data(), n);
-            ImPlot::PushStyleColor(ImPlotCol_Line, ImVec4(1, 0.3f, 0.3f, 0.6f));
+            ImPlot::PopStyleColor();
+            ImPlot::PushStyleColor(ImPlotCol_Line, col_ref);
             plot_hline("+Vmax", mv, t_min, t_max);
             plot_hline("-Vmax", -mv, t_min, t_max);
             ImPlot::PopStyleColor();
@@ -1201,11 +1395,13 @@ int main()
 
         calc_limits(j_s, 0.0f, 0.0f, y_lo, y_hi);
         if (ImPlot::BeginPlot("Jerk", ImVec2(plot_w, plot_h))) {
-            ImPlot::SetupAxes("Time (s)", "Jerk (u/s^3)");
+            ImPlot::SetupAxes("Time (s)", "Jerk (u/s\xc2\xb3)");
             ImPlot::SetupAxisLimits(ImAxis_X1, t_min, t_max, ImPlotCond_Always);
             ImPlot::SetupAxisLimits(ImAxis_Y1, y_lo, y_hi, ImPlotCond_Always);
+            ImPlot::PushStyleColor(ImPlotCol_Line, col_jrk);
             if (n > 0)
                 ImPlot::PlotLine("Num Jerk", t_s.data(), j_s.data(), n);
+            ImPlot::PopStyleColor();
             ImPlot::EndPlot();
         }
 
@@ -1216,7 +1412,7 @@ int main()
         int fb_w, fb_h;
         glfwGetFramebufferSize(window, &fb_w, &fb_h);
         glViewport(0, 0, fb_w, fb_h);
-        glClearColor(0.08f, 0.08f, 0.1f, 1.0f);
+        glClearColor(0.098f, 0.098f, 0.118f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT);
         ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
         glfwSwapBuffers(window);

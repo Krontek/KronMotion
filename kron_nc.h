@@ -68,6 +68,9 @@ typedef struct {
     float   superimposed_offset;
     float   superimposed_vel;
 
+    /* ── S-curve cruise entry state ──────────────────────────────────── */
+    bool    cruise_ramp_down;   /* Committed to ramping acc→0 for cruise   */
+
 } NC_AXIS_INTERNAL;
 
 /*===========================================================================
