@@ -245,7 +245,6 @@ typedef struct {
 
     bool     Done;
     bool     Busy;
-    bool     Active;
     bool     CommandAborted;
     bool     Error;
     uint16_t ErrorID;
