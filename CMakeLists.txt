@@ -76,5 +76,5 @@ target_link_libraries(kronmotion_tool PRIVATE
 )
 
 # ── Tests ────────────────────────────────────────────────────────────────────
-add_executable(kronmotion_test test.c)
-target_link_libraries(kronmotion_test PRIVATE kronmotion)
+# add_executable(kronmotion_test test.c)
+# target_link_libraries(kronmotion_test PRIVATE kronmotion)

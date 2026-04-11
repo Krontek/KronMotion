@@ -32,6 +32,20 @@
 #define _AXIS_SAFE(axis, inst) \
     do { if (!(axis)) { _FB_ERR(inst, _MC_ERR_PARAM); return; } } while (0)
 
+/* Validate motion parameters:
+ *   - Velocity > 0, Acceleration > 0, Deceleration > 0
+ *   - Jerk >= 0
+ *   - Acceleration >= Velocity, Deceleration >= Velocity
+ *   - When Jerk > 0: Jerk >= Acceleration AND Jerk >= Deceleration */
+static inline bool _mc_params_valid(float vel, float acc, float dec, float jerk)
+{
+    if (vel <= 0.0f || acc <= 0.0f || dec <= 0.0f) return false;
+    if (jerk < 0.0f) return false;
+    if (acc < vel || dec < vel) return false;
+    if (jerk > 0.0f && (jerk < acc || jerk < dec)) return false;
+    return true;
+}
+
 /*===========================================================================
  * AXIS_REF_Init — Reset axis to power-up defaults
  *===========================================================================*/
@@ -182,7 +196,8 @@ void MC_Stop_Call(MC_Stop *inst, AXIS_REF *axis)
     inst->_prevExecute = inst->Execute;
 
     if (rising) {
-        if (inst->Deceleration <= 0.0f) {
+        if (inst->Deceleration <= 0.0f || inst->Jerk < 0.0f ||
+            (inst->Jerk > 0.0f && inst->Jerk < inst->Deceleration)) {
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
@@ -236,7 +251,8 @@ void MC_Halt_Call(MC_Halt *inst, AXIS_REF *axis)
     }
 
     if (rising) {
-        if (inst->Deceleration <= 0.0f) {
+        if (inst->Deceleration <= 0.0f || inst->Jerk < 0.0f ||
+            (inst->Jerk > 0.0f && inst->Jerk < inst->Deceleration)) {
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
@@ -316,7 +332,7 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis)
             _FB_ERR(inst, _MC_ERR_NOT_HOMED);
             return;
         }
-        if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+        if (!_mc_params_valid(inst->Velocity, inst->Acceleration, inst->Deceleration, inst->Jerk)) {
             inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
@@ -401,7 +417,7 @@ void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis)
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
-        if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+        if (!_mc_params_valid(inst->Velocity, inst->Acceleration, inst->Deceleration, inst->Jerk)) {
             inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
@@ -485,7 +501,7 @@ void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis)
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
-        if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+        if (!_mc_params_valid(inst->Velocity, inst->Acceleration, inst->Deceleration, inst->Jerk)) {
             inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
@@ -637,6 +653,11 @@ void MC_HaltSuperimposed_Call(MC_HaltSuperimposed *inst, AXIS_REF *axis)
     }
 
     if (rising) {
+        if (inst->Deceleration <= 0.0f || inst->Jerk < 0.0f ||
+            (inst->Jerk > 0.0f && inst->Jerk < inst->Deceleration)) {
+            _FB_ERR(inst, _MC_ERR_PARAM);
+            return;
+        }
         inst->_myToken = _axis_take_token(axis);
         axis->cmd_Cmd   = NC_CMD_HALT;
         axis->cmd_Decel = inst->Deceleration;
@@ -700,7 +721,10 @@ void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis)
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
-        if (inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+        if (inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f ||
+            inst->Jerk < 0.0f ||
+            (inst->Jerk > 0.0f && (inst->Jerk < inst->Acceleration ||
+                                    inst->Jerk < inst->Deceleration))) {
             inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
@@ -793,7 +817,7 @@ void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *a
             _FB_ERR(inst, _MC_ERR_NOT_HOMED);
             return;
         }
-        if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+        if (!_mc_params_valid(inst->Velocity, inst->Acceleration, inst->Deceleration, inst->Jerk)) {
             inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
@@ -866,7 +890,7 @@ void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *a
             _FB_ERR(inst, _MC_ERR_STATE);
             return;
         }
-        if (inst->Velocity <= 0.0f || inst->Acceleration <= 0.0f || inst->Deceleration <= 0.0f) {
+        if (!_mc_params_valid(inst->Velocity, inst->Acceleration, inst->Deceleration, inst->Jerk)) {
             inst->_prevExecute = inst->Execute;  /* consume edge for param error */
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;

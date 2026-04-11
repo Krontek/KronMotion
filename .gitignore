@@ -56,5 +56,5 @@ dkms.conf
 
 
 build/*
-tool/*.log
+logs/*
 

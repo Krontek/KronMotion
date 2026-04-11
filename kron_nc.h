@@ -70,6 +70,9 @@ typedef struct {
 
     /* ── S-curve cruise entry state ──────────────────────────────────── */
     bool    cruise_ramp_down;   /* Committed to ramping acc→0 for cruise   */
+    bool    decel_committed;    /* Committed to decel zone (no flip-flop)  */
+    bool    ramp_out;           /* Committed to ramp-out phase in decel    */
+    float   v_ramp_out_thresh;  /* Ramp-out trigger velocity, computed once */
 
 } NC_AXIS_INTERNAL;
 

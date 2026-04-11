@@ -307,9 +307,17 @@ static void check_anomalies(PlotData *plot, NC_AXIS *nc, float dt,
     if (!suppress_disc && plot->t_elapsed > dt * 2.0f) {
         float da = acc - plot->prev_acc;
         float expected_da_mag = cc.jerk_limit * dt;
-        /* Natural arrival: vel≈0, acc→0, prev had motion */
-        bool at_arrival = std::fabs(vel) < 1e-3f && std::fabs(acc) < 1e-3f
-                          && std::fabs(plot->prev_vel) > 1e-3f;
+        /* Natural arrival: vel≈0, acc winding down toward zero.
+         * Discrete-time S-curve can't land vel and acc at zero simultaneously.
+         * The NC engine snaps to zero when vel reaches eps — expected behavior.
+         * Detect: vel≈0 AND (acc≈0 OR acc decreasing in same direction). */
+        bool at_arrival = (std::fabs(vel) < 1e-3f) && (
+            /* acc reached zero (snap at arrival) */
+            (std::fabs(acc) < 1e-3f) ||
+            /* acc same sign as prev and decreasing in magnitude (wind-down) */
+            (acc * plot->prev_acc > 0.0f &&
+             std::fabs(acc) < std::fabs(plot->prev_acc))
+        );
         if (expected_da_mag > 0.0f
             && std::fabs(da) > expected_da_mag + ap.acc_disc_threshold
             && !at_arrival) {
@@ -651,6 +659,12 @@ static void random_thread_func(AXIS_REF *axis, const RandomParams *rp,
         float dec  = dist_dec(rng);
         float jerk = dist_jerk(rng);
 
+        /* Enforce: acc >= vel, dec >= vel, jerk >= max(acc, dec) */
+        if (acc < vel) acc = vel;
+        if (dec < vel) dec = vel;
+        float min_jerk = std::max(acc, dec);
+        if (jerk < min_jerk) jerk = min_jerk;
+
         float cur_pos = axis->CommandedPosition;
         float cur_vel = axis->CommandedVelocity;
         float t       = plot->t_elapsed;
@@ -701,10 +715,15 @@ static void random_thread_func(AXIS_REF *axis, const RandomParams *rp,
 static std::string save_log(const std::deque<LogEntry> &entries,
                             const PlotData &plot, const char *tool_dir)
 {
+    /* Ensure the log directory exists (create if needed) */
+    std::error_code ec;
+    std::filesystem::create_directories(tool_dir, ec);
+    if (ec) return {};
+
     time_t now = std::time(nullptr);
     struct tm tm;
     localtime_r(&now, &tm);
-    char fname[128];
+    char fname[256];
     snprintf(fname, sizeof(fname), "%s/%04d-%02d-%02d_%02d-%02d-%02d.log",
              tool_dir,
              tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
@@ -982,19 +1001,13 @@ int main()
     RandomParams rparams = {
         .pos_min = -200.0f, .pos_max = 200.0f,
         .vel_min = 10.0f,   .vel_max = 100.0f,
-        .acc_min = 50.0f,   .acc_max = 500.0f,
-        .dec_min = 50.0f,   .dec_max = 500.0f,
-        .jerk_min = 0.0f,    .jerk_max = 5000.0f,
+        .acc_min = 100.0f,  .acc_max = 500.0f,
+        .dec_min = 100.0f,  .dec_max = 500.0f,
+        .jerk_min = 500.0f, .jerk_max = 5000.0f,
         .interval_min = 0.5f, .interval_max = 3.0f,
     };
 
-    /* ── Clear old log files ──────────────────────────────────────────── */
-    if (std::filesystem::exists("tool")) {
-        for (auto &entry : std::filesystem::directory_iterator("tool")) {
-            if (entry.path().extension() == ".log")
-                std::filesystem::remove(entry.path());
-        }
-    }
+    /* Old log cleanup removed — logs are kept between sessions. */
 
     /* ── Start threads ──────────────────────────────────────────────────── */
     std::thread nc_thread(nc_thread_func, &nc_axis, &plot, nc_dt,
@@ -1190,7 +1203,7 @@ int main()
         if (ImGui::Button(rp ? "Rnd Pos: ON" : "Rnd Pos: OFF", ImVec2(btn_w, 30))) {
             if (rp) {
                 std::lock_guard<std::mutex> lk(log_mtx);
-                std::string path = save_log(log_entries, plot, "tool");
+                std::string path = save_log(log_entries, plot, "logs");
                 if (!path.empty())
                     log_entries.push_back({plot.t_elapsed, 0, 0,
                         "Saved: " + path, ImVec4(0.3f, 1, 0.3f, 1), false});
@@ -1205,7 +1218,7 @@ int main()
         if (ImGui::Button(rv ? "Rnd Vel: ON" : "Rnd Vel: OFF", ImVec2(btn_w, 30))) {
             if (rv) {
                 std::lock_guard<std::mutex> lk(log_mtx);
-                std::string path = save_log(log_entries, plot, "tool");
+                std::string path = save_log(log_entries, plot, "logs");
                 if (!path.empty())
                     log_entries.push_back({plot.t_elapsed, 0, 0,
                         "Saved: " + path, ImVec4(0.3f, 1, 0.3f, 1), false});
@@ -1424,6 +1437,14 @@ int main()
     g_random_vel.store(false);
     nc_thread.join();
     rand_thread.join();
+
+    /* Auto-save log on exit if there are entries */
+    {
+        std::lock_guard<std::mutex> lk(log_mtx);
+        if (!log_entries.empty()) {
+            save_log(log_entries, plot, "logs");
+        }
+    }
 
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();

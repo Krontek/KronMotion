@@ -111,8 +111,23 @@ static bool _nc_latch_cmd(NC_AXIS *nc)
     nc->priv.acc         = ref->cmd_Accel;
     nc->priv.dec         = ref->cmd_Decel;
     nc->priv.jerk        = ref->cmd_Jerk;
+
+    /* Defensive: enforce minimum values and relationships.
+     * MC layer validates these, but tool/test code may bypass MC. */
+    if (nc->priv.acc  < _NC_VEL_EPS) nc->priv.acc  = 1000.0f;
+    if (nc->priv.dec  < _NC_VEL_EPS) nc->priv.dec  = 1000.0f;
+    if (nc->priv.jerk < 0.0f)        nc->priv.jerk = 0.0f;
+    if (nc->priv.jerk > 0.0f) {
+        float min_jerk = _NC_FMAX(nc->priv.acc, nc->priv.dec);
+        if (nc->priv.jerk < min_jerk)
+            nc->priv.jerk = min_jerk;
+    }
+
     nc->priv.in_velocity = false;
     nc->priv.cruise_ramp_down = false;
+    nc->priv.decel_committed = false;
+    nc->priv.ramp_out = false;
+    nc->priv.v_ramp_out_thresh = 0.0f;
 
     /* Acknowledge: NC has latched the command */
     KRON_STORE_REL_U16(&ref->sts_AckSeq, cur_seq);
@@ -397,6 +412,16 @@ static bool _nc_profile_vel(NC_AXIS_INTERNAL *p, float dt)
      * discrete-time lag (same idea as _nc_profile_pos stopping margin) */
     float margin = _NC_FABS(acc) * dt * 2.0f;
 
+    /* Commit to ramp-down once entered (same pattern as cruise_ramp_down).
+     * Once abs_diff <= dv_ramp_down, we must keep reducing acc to arrive
+     * at target_vel smoothly.  Without commitment the condition can flip
+     * each cycle as dv_ramp_down changes with acc. */
+    if (!p->cruise_ramp_down &&
+        acc_toward >= 0.0f &&
+        abs_diff <= dv_ramp_down + margin + _NC_VEL_EPS) {
+        p->cruise_ramp_down = true;
+    }
+
     float new_acc;
     if (acc_toward < -_NC_VEL_EPS) {
         /* Acc is opposing desired direction (inherited from previous cmd).
@@ -406,12 +431,15 @@ static bool _nc_profile_vel(NC_AXIS_INTERNAL *p, float dt)
          * that's handled by the normal branch once acc_toward >= 0. */
         if ((new_acc * dir) > 0.0f)
             new_acc = 0.0f;
-    } else if (abs_diff <= dv_ramp_down + margin + _NC_VEL_EPS) {
-        /* Must start reducing acceleration to arrive at target vel smoothly */
+        p->cruise_ramp_down = false;
+    } else if (p->cruise_ramp_down) {
+        /* Committed to ramp-down: reduce acc to arrive at target vel */
         new_acc = acc - dir * j * dt;
         /* Don't overshoot zero (would push vel away from target) */
-        if ((acc * dir > 0.0f) && (new_acc * dir < 0.0f))
+        if ((acc * dir > 0.0f) && (new_acc * dir < 0.0f)) {
             new_acc = 0.0f;
+            p->cruise_ramp_down = false;
+        }
     } else {
         /* Can still increase acceleration toward acc_limit */
         new_acc = acc + dir * j * dt;
@@ -419,10 +447,16 @@ static bool _nc_profile_vel(NC_AXIS_INTERNAL *p, float dt)
 
     /* Clamp acceleration only in the desired direction.
      * When acc is opposing (being ramped toward zero by jerk above),
-     * don't hard-clamp — let jerk do the work smoothly. */
-    if (new_acc * dir > 0.0f) {
-        if (_NC_FABS(new_acc) > acc_limit)
+     * don't hard-clamp — let jerk do the work smoothly.
+     * When inherited |acc| exceeds limit, ramp down instead of clamping. */
+    if (new_acc * dir > 0.0f && _NC_FABS(new_acc) > acc_limit) {
+        if (_NC_FABS(acc) > acc_limit + _NC_VEL_EPS) {
+            /* Inherited above limit — ramp toward limit */
+            new_acc = acc - dir * j * dt;
+            if (_NC_FABS(new_acc) < acc_limit) new_acc = dir * acc_limit;
+        } else {
             new_acc = dir * acc_limit;
+        }
     }
 
     /* Integrate: acc → vel */
@@ -551,15 +585,26 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
             /* Inherited negative acc below -dec — ramp up toward -dec */
             new_acc = acc + j * dt;
             if (new_acc > -p->dec) new_acc = -p->dec;
-        } else if (a_decel > _NC_VEL_EPS &&
-                   abs_vel <= dv_ramp_out + _NC_VEL_EPS * 2.0f) {
-            /* Ramp-out: reduce deceleration to arrive at vel=0 smoothly */
-            new_acc = acc - j * dt;
-            if (new_acc < 0.0f) new_acc = 0.0f;
         } else {
-            /* Ramp-in: build deceleration (positive acc opposes negative vel) */
-            new_acc = acc + j * dt;
-            if (new_acc > limit) new_acc = limit;
+            /* Ramp-in / ramp-out with commitment — use constant threshold. */
+            if (p->v_ramp_out_thresh < _NC_VEL_EPS) {
+                float dv_full = (limit * limit) / (2.0f * j);
+                p->v_ramp_out_thresh = (abs_vel >= 2.0f * dv_full) ? dv_full : abs_vel * 0.5f;
+            }
+            if (!p->ramp_out && a_decel > _NC_VEL_EPS &&
+                abs_vel <= p->v_ramp_out_thresh + _NC_VEL_EPS * 2.0f) {
+                p->ramp_out = true;
+            }
+
+            if (p->ramp_out) {
+                /* Ramp-out: reduce deceleration to arrive at vel=0 smoothly */
+                new_acc = acc - j * dt;
+                if (new_acc < 0.0f) { new_acc = 0.0f; p->ramp_out = false; }
+            } else {
+                /* Ramp-in: build deceleration (positive acc opposes negative vel) */
+                new_acc = acc + j * dt;
+                if (new_acc > limit) new_acc = limit;
+            }
         }
 
         float nv = (vel + new_acc * dt) * dir;
@@ -589,7 +634,22 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
 
     float new_acc_dir;  /* acceleration in direction of motion */
 
-    if (stop_dist >= abs_rem - _NC_POS_EPS) {
+    /* Commit to decel zone once entered — prevents flip-flop at boundary.
+     * Compute ramp-out velocity threshold ONCE from current state so the
+     * per-cycle ramp-in/ramp-out decision uses a constant, not a moving target. */
+    if (!p->decel_committed && stop_dist >= abs_rem - _NC_POS_EPS) {
+        p->decel_committed = true;
+        p->ramp_out = false;
+        /* Effective velocity after ramping current acc back to zero */
+        float v_eff = abs_vel;
+        if (acc > _NC_VEL_EPS) v_eff += (acc * acc) / (2.0f * j);
+        float dv_full = (p->dec * p->dec) / (2.0f * j);
+        /* Full S-curve: ramp-out starts at dec²/(2·j).
+         * Triangular (short move): peak acc < dec → ramp-out at v_eff/2. */
+        p->v_ramp_out_thresh = (v_eff >= 2.0f * dv_full) ? dv_full : v_eff * 0.5f;
+    }
+
+    if (p->decel_committed) {
         /*--- DECELERATION ZONE ---
          * Need to slow down. Three sub-decisions:
          * 1. If acc > 0: first ramp acc down to 0 (apply negative jerk)
@@ -600,20 +660,35 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
             /* Still accelerating — ramp down to zero first */
             new_acc_dir = acc - j * dt;
             if (new_acc_dir < 0.0f) new_acc_dir = 0.0f;
+        } else if (-acc > p->dec + _NC_VEL_EPS && !p->ramp_out) {
+            /* Inherited deceleration exceeds dec limit (from previous command
+             * with higher limits).  Ramp smoothly toward -dec using jerk
+             * instead of hard-clamping, which would cause acc discontinuity. */
+            new_acc_dir = acc + j * dt;
+            if (new_acc_dir > -p->dec) new_acc_dir = -p->dec;
         } else {
             /* Decelerating: decide ramp-in vs ramp-out.
              *
              * Ramp-out condition: velocity is low enough that ramping
              * acceleration from current value to zero will bring v to 0.
              *   During ramp-out:  Δv = |a|² / (2·j)
-             *   So ramp-out when:  v ≤ |a|² / (2·j)                   */
-            float abs_a = _NC_FABS(acc);
-            float dv_ramp_out = (abs_a * abs_a) / (2.0f * j);
+             *   So ramp-out when:  v ≤ |a|² / (2·j)
+             *
+             * Once committed to ramp-out, stay in ramp-out until acc
+             * reaches zero.  This prevents chattering at the boundary
+             * (ramp-out reduces |acc| → dv_ramp_out shrinks → condition
+             * flips to ramp-in → |acc| grows → flips back). */
+            if (!p->ramp_out && abs_vel <= p->v_ramp_out_thresh + _NC_VEL_EPS * 2.0f) {
+                p->ramp_out = true;
+            }
 
-            if (abs_vel <= dv_ramp_out + _NC_VEL_EPS * 2.0f) {
+            if (p->ramp_out) {
                 /* RAMP-OUT: reduce |deceleration| → arrive at v=0 smoothly */
                 new_acc_dir = acc + j * dt;
-                if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
+                if (new_acc_dir > 0.0f) {
+                    new_acc_dir = 0.0f;
+                    p->ramp_out = false;
+                }
             } else {
                 /* RAMP-IN: build deceleration magnitude */
                 new_acc_dir = acc - j * dt;
@@ -634,10 +709,23 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
                 /* Ramp-out: ease off deceleration to arrive at v_max */
                 new_acc_dir = acc + j * dt;
                 if (new_acc_dir > 0.0f) new_acc_dir = 0.0f;
-            } else {
-                /* Ramp-in: build deceleration */
+            } else if (acc >= -_NC_VEL_EPS) {
+                /* Not yet decelerating — start ramp-in */
                 new_acc_dir = acc - j * dt;
                 if (new_acc_dir < -p->dec) new_acc_dir = -p->dec;
+            } else {
+                /* Already decelerating — continue ramp-in, hold, or ramp
+                 * down if inherited |acc| exceeds dec limit. */
+                if (-acc > p->dec + _NC_VEL_EPS) {
+                    /* Inherited decel above limit — ramp toward -dec */
+                    new_acc_dir = acc + j * dt;
+                    if (new_acc_dir > -p->dec) new_acc_dir = -p->dec;
+                } else if (-acc < p->dec) {
+                    new_acc_dir = acc - j * dt;
+                    if (new_acc_dir < -p->dec) new_acc_dir = -p->dec;
+                } else {
+                    new_acc_dir = -p->dec;
+                }
             }
         } else if (abs_vel >= p->v_max - _NC_VEL_EPS) {
             /* At cruise speed — ramp acceleration to zero */
@@ -684,6 +772,10 @@ static bool _nc_profile_pos(NC_AXIS_INTERNAL *p, float dt)
                         new_acc_dir = 0.0f;
                         p->cruise_ramp_down = false;
                     }
+                } else if (acc > p->acc + _NC_VEL_EPS) {
+                    /* Inherited acc exceeds limit — ramp down toward limit */
+                    new_acc_dir = acc - j * dt;
+                    if (new_acc_dir < p->acc) new_acc_dir = p->acc;
                 } else {
                     new_acc_dir = acc + j * dt;
                     if (new_acc_dir > p->acc) new_acc_dir = p->acc;
@@ -770,19 +862,32 @@ static bool _nc_decel_to_zero(NC_AXIS_INTERNAL *p, float dt)
     float abs_vel = _NC_FABS(vel);
     float a_toward_zero = -acc * sign;  /* positive when decelerating correctly */
 
-    /* Distance/velocity to ramp current decel back to zero:
-     * dv = a²/(2·j) */
-    float dv_ramp_out = (a_toward_zero > 0.0f)
-        ? (a_toward_zero * a_toward_zero) / (2.0f * j)
-        : 0.0f;
+    /* Compute ramp-out velocity threshold once (first call after latch).
+     * Using a constant threshold eliminates the per-cycle feedback loop:
+     *   dynamic: dv = a²/(2·j) changes as a changes → chattering
+     *   constant: computed from initial velocity → monotone trigger. */
+    if (p->v_ramp_out_thresh < _NC_VEL_EPS) {
+        float dv_full = (p->dec * p->dec) / (2.0f * j);
+        p->v_ramp_out_thresh = (abs_vel >= 2.0f * dv_full) ? dv_full : abs_vel * 0.5f;
+    }
+
+    /* Commit to ramp-out once entered. */
+    if (!p->ramp_out && abs_vel <= p->v_ramp_out_thresh + _NC_VEL_EPS * 2.0f) {
+        p->ramp_out = true;
+    }
 
     float new_acc;
-    if (abs_vel <= dv_ramp_out + _NC_VEL_EPS * 2.0f) {
+    if (p->ramp_out) {
         /* Close to stop — ramp acceleration back toward zero */
         new_acc = acc + sign * j * dt;
         /* Don't let acc overshoot zero */
-        if (sign > 0.0f && new_acc > 0.0f) new_acc = 0.0f;
-        if (sign < 0.0f && new_acc < 0.0f) new_acc = 0.0f;
+        if (sign > 0.0f && new_acc > 0.0f) { new_acc = 0.0f; p->ramp_out = false; }
+        if (sign < 0.0f && new_acc < 0.0f) { new_acc = 0.0f; p->ramp_out = false; }
+    } else if (a_toward_zero > _NC_VEL_EPS && _NC_FABS(acc) > p->dec + _NC_VEL_EPS) {
+        /* Inherited |decel| exceeds dec limit (acc correctly opposing vel)
+         * — ramp toward limit smoothly instead of hard-clamping. */
+        new_acc = acc + sign * j * dt;
+        if (_NC_FABS(new_acc) < p->dec) new_acc = -sign * p->dec;
     } else {
         /* Build deceleration (increase |acc| opposing velocity) */
         new_acc = acc - sign * j * dt;
