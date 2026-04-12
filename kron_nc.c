@@ -959,6 +959,17 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
     bool new_cmd = _nc_latch_cmd(nc);
 
     if (new_cmd) {
+        /* MC_Stop lock: while StopActive, reject all motion commands.
+           Only POWER_OFF and STOP (re-trigger) are allowed through. */
+        if (ref->StopActive &&
+            p->latched_cmd != NC_CMD_POWER_OFF &&
+            p->latched_cmd != NC_CMD_STOP) {
+            /* Silently discard — axis stays in STOPPING */
+            new_cmd = false;
+        }
+    }
+
+    if (new_cmd) {
         switch (p->latched_cmd) {
             case NC_CMD_POWER_ON:
                 p->power_requested = true;
@@ -1092,9 +1103,18 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
             bool stopped = _nc_decel_to_zero(p, dt);
             ref->sts_Busy = !stopped;
             if (stopped) {
-                ref->sts_Done  = true;
-                ref->sts_State = MC_AXIS_STANDSTILL;
-                ref->sts_Busy  = false;
+                ref->sts_Done = true;
+                /* MC_Stop locks the axis in STOPPING while Execute=TRUE.
+                   Only transition to STANDSTILL when StopActive is cleared
+                   (MC_Stop.Execute released) or for non-Stop commands (Halt). */
+                if (!ref->StopActive) {
+                    ref->sts_State = MC_AXIS_STANDSTILL;
+                    ref->sts_Busy  = false;
+                } else {
+                    /* Hold position, stay in STOPPING */
+                    p->cmd_vel = 0.0f;
+                    p->cmd_acc = 0.0f;
+                }
             }
             break;
         }

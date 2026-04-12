@@ -195,12 +195,30 @@ void MC_Stop_Call(MC_Stop *inst, AXIS_REF *axis)
     bool rising = inst->Execute && !inst->_prevExecute;
     inst->_prevExecute = inst->Execute;
 
+    /* ── Execute released: unlock axis, transition to Standstill ─────── */
+    if (!inst->Execute) {
+        if (axis->StopActive) {
+            axis->StopActive = false;
+            /* If deceleration was complete, NC is holding in STOPPING for us.
+               Nudge it to STANDSTILL now. */
+            if (inst->Done || !inst->Busy) {
+                axis->sts_State = MC_AXIS_STANDSTILL;
+                axis->sts_Busy  = false;
+            }
+        }
+        inst->Busy = false;
+        inst->Done = false;
+        return;
+    }
+
+    /* ── Rising edge: issue stop command ─────────────────────────────── */
     if (rising) {
         if (inst->Deceleration <= 0.0f || inst->Jerk < 0.0f ||
             (inst->Jerk > 0.0f && inst->Jerk < inst->Deceleration)) {
             _FB_ERR(inst, _MC_ERR_PARAM);
             return;
         }
+        axis->StopActive = true;
         axis->cmd_Cmd   = NC_CMD_STOP;
         axis->cmd_Decel = inst->Deceleration;
         axis->cmd_Jerk  = inst->Jerk;
@@ -208,27 +226,35 @@ void MC_Stop_Call(MC_Stop *inst, AXIS_REF *axis)
         inst->Busy  = true;
         inst->Done  = false;
         inst->Error = false;
+        inst->CommandAborted = false;
         return;
     }
 
+    /* ── Execute=TRUE, not rising edge ───────────────────────────────── */
     if (!inst->Busy) return;
 
     /* Abort if axis lost power */
     if (!axis->PowerEnabled) {
+        axis->StopActive = false;
         inst->Done = false;
         inst->Busy = false;
         return;
     }
 
     if (axis->sts_Error) {
+        axis->StopActive  = false;
         inst->Error   = true;
         inst->ErrorID = axis->sts_ErrorID;
         inst->Busy    = false;
         return;
     }
-    if (axis->sts_Done) {
+
+    /* Deceleration complete: axis stopped, but stay locked (Busy=true)
+       as long as Execute=TRUE — PLCopen non-abortable semantics.       */
+    if (axis->sts_Done && !inst->Done) {
         inst->Done = true;
-        inst->Busy = false;
+        /* Busy intentionally stays true — axis remains in STOPPING
+           until Execute is released (handled at top of function). */
     }
 }
 

@@ -159,6 +159,12 @@ typedef struct {
     uint16_t          drv_StatusWord;   /* 0x6041 — last received from drive  */
     uint16_t          drv_ControlWord;  /* 0x6040 — last sent to drive        */
 
+    /* ── MC_Stop lock (PLCopen: non-abortable, axis locked while Execute) ── */
+    /* Written by MC_Stop_Call in Slow Task only.  While true the NC engine  */
+    /* holds the axis in MC_AXIS_STOPPING even after deceleration completes, */
+    /* and all other motion FBs refuse to start.                             */
+    bool              StopActive;
+
     /* ── Slow-Task-only: abort coordination between concurrent FBs ───────── */
     /* When a new FB takes control it increments _ActiveToken.               */
     /* Each FB stores its own token at Execute↑ in _myToken (FB-private).   */
