@@ -166,8 +166,8 @@ static bool _nc_cia402_step(NC_AXIS *nc)
         /* Attempt fault reset once */
         slot->control_word = CIA402_CW_FACK;
         ref->sts_Error     = true;
-        ref->sts_ErrorID   = 0x8010u;  /* Vendor: drive fault */
-        ref->AxisErrorID   = 0x8010u;
+        ref->sts_ErrorID   = 100u;  /* Vendor: drive fault */
+        ref->AxisErrorID   = 100u;
         ref->sts_State     = MC_AXIS_ERRORSTOP;
         return false;
     }
@@ -1140,7 +1140,7 @@ void NC_ProcessOne(NC_AXIS *nc, float dt)
             /* Fault during homing → error */
             if (_cia402_fault(hsw)) {
                 ref->sts_Error   = true;
-                ref->sts_ErrorID = 0x8010u;
+                ref->sts_ErrorID = 100u;
                 ref->sts_State   = MC_AXIS_ERRORSTOP;
                 ref->sts_Busy    = false;
                 p->homing_phase  = 0;

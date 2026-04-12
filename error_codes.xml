@@ -1,0 +1,158 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  KronMotion — Error Code Catalog
+  Per-block error codes for PLCopen Motion Control function blocks.
+  ErrorID values are block-local: code 1 in MC_MoveAbsolute is independent of code 1 in MC_Stop.
+
+  Error sources:
+    - FB-level: validation errors detected by the _Call function itself (codes 1-99)
+    - Axis-level: propagated from NC engine via sts_ErrorID (codes 100+)
+-->
+<error_codes library="KronMotion">
+
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+  <!-- FB-level shared error definitions (used by multiple blocks)       -->
+  <!-- ═══════════════════════════════════════════════════════════════════ -->
+
+  <block type="MC_Power">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_Home">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be Standstill or Homing" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_Stop">
+    <error code="1" name="ERR_PARAM" text="Invalid Deceleration (must be > 0) or Jerk (must be >= 0, and >= Deceleration when > 0)" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_Halt">
+    <error code="1" name="ERR_PARAM" text="Invalid Deceleration (must be > 0) or Jerk (must be >= 0, and >= Deceleration when > 0)" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state for Halt command" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_MoveAbsolute">
+    <error code="1" name="ERR_PARAM" text="Invalid motion parameters (Velocity, Acceleration, Deceleration must be > 0; Jerk >= 0)" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be Standstill, DiscreteMotion, or ContinuousMotion" />
+    <error code="3" name="ERR_NOT_HOMED" text="Axis not homed — home the axis before absolute moves" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_MoveRelative">
+    <error code="1" name="ERR_PARAM" text="Invalid motion parameters (Velocity, Acceleration, Deceleration must be > 0; Jerk >= 0)" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be Standstill, DiscreteMotion, or ContinuousMotion" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_MoveAdditive">
+    <error code="1" name="ERR_PARAM" text="Invalid motion parameters (Velocity, Acceleration, Deceleration must be > 0; Jerk >= 0)" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be Standstill or DiscreteMotion" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_MoveSuperimposed">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — cannot superimpose in Disabled, ErrorStop, or Stopping" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_HaltSuperimposed">
+    <error code="1" name="ERR_PARAM" text="Invalid Deceleration (must be > 0) or Jerk (must be >= 0, and >= Deceleration when > 0)" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_MoveVelocity">
+    <error code="1" name="ERR_PARAM" text="Invalid motion parameters (Acceleration, Deceleration must be > 0; Jerk >= 0)" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — cannot start in Disabled, ErrorStop, or Stopping" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_MoveContinuousAbsolute">
+    <error code="1" name="ERR_PARAM" text="Invalid motion parameters (Velocity, Acceleration, Deceleration must be > 0; Jerk >= 0)" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be Standstill, DiscreteMotion, or ContinuousMotion" />
+    <error code="3" name="ERR_NOT_HOMED" text="Axis not homed — home the axis before absolute moves" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_MoveContinuousRelative">
+    <error code="1" name="ERR_PARAM" text="Invalid motion parameters (Velocity, Acceleration, Deceleration must be > 0; Jerk >= 0)" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be Standstill, DiscreteMotion, or ContinuousMotion" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_SetPosition">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be Standstill" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_SetOverride">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadParameter">
+    <error code="1" name="ERR_PARAM" text="Invalid ParameterNumber (valid: 0-7)" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadBoolParameter">
+    <error code="1" name="ERR_PARAM" text="Invalid ParameterNumber (valid: 10-12)" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_WriteParameter">
+    <error code="1" name="ERR_PARAM" text="Invalid ParameterNumber (writable: 5-7)" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_WriteBoolParameter">
+    <error code="1" name="ERR_PARAM" text="Invalid ParameterNumber (writable: 11)" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadActualPosition">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadActualVelocity">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadActualTorque">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadStatus">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadMotionState">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadAxisInfo">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="100" name="ERR_DRIVE_FAULT" text="Drive fault detected (CiA402 fault bit)" />
+  </block>
+
+  <block type="MC_ReadAxisError">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+  </block>
+
+  <block type="MC_Reset">
+    <error code="1" name="ERR_PARAM" text="NULL axis reference" />
+    <error code="2" name="ERR_STATE" text="Wrong axis state — must be ErrorStop" />
+  </block>
+
+</error_codes>

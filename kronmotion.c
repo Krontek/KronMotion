@@ -19,10 +19,11 @@
 #include "kronmotion.h"
 #include <string.h>  /* memset */
 
-/* ── Error codes (vendor-defined range 0x8000) ─────────────────────────── */
-#define _MC_ERR_STATE     0x8001u   /* Wrong axis state for this command   */
-#define _MC_ERR_PARAM     0x8002u   /* Invalid parameter (e.g. Velocity=0) */
-#define _MC_ERR_NOT_HOMED 0x8003u   /* Axis not homed for absolute move    */
+/* ── Error codes (per-block, see error_codes.xml for descriptions) ──────── */
+#define _MC_ERR_PARAM     1u   /* Invalid parameter (velocity, decel, etc.) */
+#define _MC_ERR_STATE     2u   /* Wrong axis state for this command         */
+#define _MC_ERR_NOT_HOMED 3u   /* Axis not homed for absolute move          */
+#define _MC_ERR_DRIVE     100u /* Drive fault (propagated from NC engine)    */
 
 /* ── Internal convenience macros ─────────────────────────────────────────── */
 #define _FB_ERR(inst, code) \
