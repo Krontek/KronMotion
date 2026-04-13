@@ -653,8 +653,7 @@ static bool _nc_motion_step(NC_AXIS_INTERNAL *p, float dt)
             p->cmd_vel = eff_vel;
             p->cmd_acc = 0.0f;
             p->cmd_pos += eff_vel * dt;
-            p->in_velocity = true;
-            return true;
+            return true;  /* caller (NC_ProcessOne) sets p->in_velocity */
         }
         break;
     }
