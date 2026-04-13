@@ -994,7 +994,7 @@ int main()
         .acc_disc_threshold  = 5.0f,
         .vel_overshoot_pct   = 1.0f,
         .acc_overshoot_pct   = 1.0f,
-        .pos_overshoot_abs   = 0.01f,
+        .pos_overshoot_abs   = 0.0004f,
     };
 
     /* ── Random params ──────────────────────────────────────────────────── */

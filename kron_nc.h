@@ -30,6 +30,22 @@
 #include "kronmotion.h"
 
 /*===========================================================================
+ * NC_GEN_MODE — Unified motion generator mode
+ *
+ * All motion types (position, velocity, stop) share a single generator.
+ * The mode determines how the effective target velocity is computed:
+ *   POSITION — finite trajectory: decelerate to zero at target_pos
+ *   VELOCITY — infinite trajectory: ramp to target_vel and hold
+ *   STOP     — decelerate to standstill (target_vel = 0)
+ *===========================================================================*/
+typedef enum {
+    NC_GEN_IDLE     = 0,   /* No active motion, hold position          */
+    NC_GEN_POSITION = 1,   /* Discrete: move to target_pos, stop there */
+    NC_GEN_VELOCITY = 2,   /* Continuous: ramp to target_vel, hold     */
+    NC_GEN_STOP     = 3    /* Decelerate to zero velocity              */
+} NC_GEN_MODE;
+
+/*===========================================================================
  * NC_AXIS_INTERNAL
  *
  * NC Engine private state per axis.  Not visible to Slow Task.
@@ -68,11 +84,14 @@ typedef struct {
     float   superimposed_offset;
     float   superimposed_vel;
 
-    /* ── S-curve cruise entry state ──────────────────────────────────── */
-    bool    cruise_ramp_down;   /* Committed to ramping acc→0 for cruise   */
-    bool    decel_committed;    /* Committed to decel zone (no flip-flop)  */
-    bool    ramp_out;           /* Committed to ramp-out phase in decel    */
-    float   v_ramp_out_thresh;  /* Ramp-out trigger velocity, computed once */
+    /* ── Unified motion generator ───────────────────────────────────── */
+    NC_GEN_MODE gen_mode;       /* Current generation mode                 */
+
+    /* ── S-curve velocity ramp state ─────────────────────────────────── */
+    bool    cruise_ramp_down;   /* Committed to ramping acc→0 for arrival  */
+    bool    decel_committed;    /* Position mode: committed to braking     */
+    bool    ramp_out;           /* (reserved)                              */
+    float   v_ramp_out_thresh;  /* (reserved)                              */
 
 } NC_AXIS_INTERNAL;
 
