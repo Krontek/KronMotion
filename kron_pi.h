@@ -3,7 +3,7 @@
  *
  * This is the neutral shared-memory contract between:
  *   - HAL drivers  (KronEthercatMaster, KronCANopen, etc.) — write inputs, read outputs
- *   - NC Engine    (KronMotion / kron_nc.c)                 — read inputs, write outputs
+ *   - Axis engine  (KronMotion / kron_axis.c)               — read inputs, write outputs
  *   - PLC Logic    (KronLogic / user program)               — read/write DI/DO/AI/AO
  *
  * Dependency: stdint.h, stdbool.h only. No fieldbus headers.
@@ -11,19 +11,21 @@
  * Layer diagram:
  *
  *   ┌─────────────────────────────────────────────────────┐
- *   │  KronLogic / User PLC Program  (Slow Task ~10ms)    │
- *   │  KronMotion FBs                                     │  ← consumes kron_pi.h
+ *   │  KronLogic / User PLC Program                       │
+ *   │  KronMotion MC_xxx function blocks                  │  ← consumes kron_pi.h
  *   └───────────────────────┬─────────────────────────────┘
- *                           │  AXIS_REF (cmd_* / sts_*)
+ *                           │  AXIS_REF + KRON_MOTION_REQ
  *   ┌───────────────────────▼─────────────────────────────┐
- *   │  NC Engine  (Fast Task ~1ms)                        │
- *   │  NC_ProcessAxes() — interpolation, CiA402 state     │  ← consumes kron_pi.h
+ *   │  Axis engine  (kron_axis.c)                         │
+ *   │  trajectory core, state diagram, CiA402             │  ← consumes kron_pi.h
  *   └───────────────────────┬─────────────────────────────┘
  *                           │  KRON_PROCESS_IMAGE
  *   ┌───────────────────────▼─────────────────────────────┐
  *   │  KRON_HAL_Driver  (implements read/write)           │
  *   │  KronEthercatMaster / KronCANopen / KronModbus      │  ← implements kron_pi.h
  *   └─────────────────────────────────────────────────────┘
+ *
+ * All three run in one task, in that order, once per cycle.
  *
  *===========================================================================*/
 
@@ -48,6 +50,8 @@ typedef enum {
 #define KRON_MAX_AO           64
 
 /* ── Atomic helpers ──────────────────────────────────────────────────────── */
+/* Kept for drivers that exchange the image with a task of their own; the    */
+/* motion layer itself is single task and needs none of them.                */
 /* Requires GCC or Clang (standard for Linux PLC targets).                   */
 /* Fall back to volatile cast for other toolchains (baremetal, MSVC).        */
 #if defined(__GNUC__) || defined(__clang__)
@@ -63,29 +67,11 @@ typedef enum {
 #endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * NC Command Vocabulary
- * Defined here so kron_pi.h has no dependency on kronmotion.h, yet both
- * AXIS_REF (kronmotion.h) and NC_AXIS_STATE (kron_nc.h) share the same type.
- * ═══════════════════════════════════════════════════════════════════════════ */
-typedef enum {
-    NC_CMD_NONE          = 0,  /* No pending command               */
-    NC_CMD_POWER_ON      = 1,  /* Enable drive power stage         */
-    NC_CMD_POWER_OFF     = 2,  /* Disable drive power stage        */
-    NC_CMD_MOVE_ABS      = 3,  /* Move to absolute position        */
-    NC_CMD_MOVE_REL      = 4,  /* Move by relative distance        */
-    NC_CMD_MOVE_VEL      = 5,  /* Move at constant velocity        */
-    NC_CMD_HALT          = 6,  /* Decelerate to zero, → Standstill */
-    NC_CMD_STOP          = 7,  /* Emergency stop, → Stopping       */
-    NC_CMD_HOME          = 8,  /* Execute homing sequence          */
-    NC_CMD_MOVE_ADD      = 9,  /* Additive move (superimposed)     */
-} NC_CMD_TYPE;
-
-/* ═══════════════════════════════════════════════════════════════════════════
  * KRON_SERVO_SLOT
  *
  * One slot per physical servo drive in the process image.
  * Fieldbus driver writes the "inputs" section each cycle.
- * NC Engine writes the "outputs" section each cycle.
+ * The axis engine writes the "outputs" section each cycle.
  * CiA402 (DS-402) fieldnames used for fieldbus-agnostic naming.
  * ═══════════════════════════════════════════════════════════════════════════ */
 typedef struct {
@@ -97,7 +83,7 @@ typedef struct {
     uint16_t status_word;          /* CiA402 statusword (object 0x6041)         */
     uint8_t  mode_display;         /* Modes of operation display (0x6061)       */
 
-    /* ── Outputs: written by NC Engine (image → fieldbus via HAL) ── */
+    /* ── Outputs: written by the axis engine (image → fieldbus via HAL) ── */
     int32_t  target_pos_raw;       /* Target position (counts) (0x607A)         */
     int32_t  target_vel_raw;       /* Target velocity (counts/s) (0x60FF)       */
     /* Note: vel_raw_per_unit = counts_per_unit (both in counts/s per u/s)     */
@@ -136,15 +122,15 @@ typedef struct {
  * KRON_HAL_Driver
  *
  * A fieldbus driver registers itself by filling this struct and calling
- * KRON_HAL_Register().  The NC Fast Task calls HAL_Read_Inputs() and
- * HAL_Write_Outputs() through these pointers — it never knows which
- * fieldbus is underneath.
+ * KRON_HAL_Register().  KronMotion_ReadInputs() / KronMotion_WriteOutputs()
+ * call through these pointers — the motion layer never knows which fieldbus
+ * is underneath.
  * ═══════════════════════════════════════════════════════════════════════════ */
 typedef struct {
-    /* Called at start of every fast cycle: fieldbus PDO → process image */
+    /* Called at start of every cycle: fieldbus PDO → process image */
     void        (*read_inputs)(KRON_PROCESS_IMAGE *pi);
 
-    /* Called at end of every fast cycle: process image → fieldbus PDO */
+    /* Called at end of every cycle: process image → fieldbus PDO */
     void        (*write_outputs)(KRON_PROCESS_IMAGE *pi);
 
     /* Optional lifecycle hooks */
@@ -159,7 +145,7 @@ typedef struct {
 extern KRON_PROCESS_IMAGE  Kron_PI;      /* The global process image          */
 extern KRON_HAL_Driver    *Kron_HAL;     /* Active HAL driver (set at boot)   */
 
-/* ── Inline wrappers called by the Fast Task ─────────────────────────────── */
+/* ── Inline wrappers called by the motion task ───────────────────────────── */
 static inline void HAL_Read_Inputs(void) {
     if (Kron_HAL && Kron_HAL->read_inputs && Kron_HAL->ready)
         Kron_HAL->read_inputs(&Kron_PI);

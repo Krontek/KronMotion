@@ -1,21 +1,22 @@
 /*===========================================================================
- * kronmotion.h  --  KronEditor PLCopen Motion Control Function Blocks
- * Specification: PLCopen TC2 Part 1 Version 2.0 (March 17, 2011)
+ * kronmotion.h  --  PLCopen Motion Control function blocks
+ * Specification: PLCopen TC2 Part 1, Version 2.0 (March 17, 2011)
  *
- * Architecture: Decoupled Dual-Task Motion
- *   Slow Task  (~10ms) — runs MC_xxx FBs.  FBs write to AXIS_REF cmd channel,
- *                         read from AXIS_REF sts channel.  No interpolation here.
- *   Fast Task  (~1ms)  — NC Engine (kron_nc.c) reads cmd channel, runs
- *                         trapezoidal profile, writes sts channel + process image.
+ * The function blocks are a thin, faithful surface over the axis engine in
+ * kron_axis.c: an FB validates its inputs, hands a KRON_MOTION_REQ to the axis
+ * on the rising edge of Execute, and maps the request's result back onto
+ * Done / Busy / Active / CommandAborted / Error every cycle.  No FB owns any
+ * motion of its own, which is what makes the exclusivity and abort rules of
+ * chapter 2.4 come out right.
  *
- * Lock-free handshake (cmd_Seq / sts_AckSeq):
- *   Slow Task: write cmd_* params, then KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1)
- *   Fast Task: poll cmd_Seq != sts_AckSeq → latch new command →
- *              KRON_STORE_REL_U16(&axis->sts_AckSeq, latched_seq)
+ * Calling convention:  MC_Xxx_Call(MC_Xxx *inst, AXIS_REF *axis)
+ * Call every instance every cycle, as IEC 61131-3 does.
  *
- * Naming convention: XXX_Call(XXX *inst, AXIS_REF *axis)
- * B = Basic (mandatory per PLCopen compliance)
- * E = Extended (optional)
+ *   B = Basic     (mandatory for PLCopen compliance)
+ *   E = Extended  (optional)
+ *
+ * REAL is mapped to double: the trajectory core works in double, and a float
+ * position accumulator drifts visibly on a long-travel axis running for hours.
  *===========================================================================*/
 
 #ifndef KRONMOTION_H
@@ -23,261 +24,103 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include "kron_pi.h"              /* KRON_SERVO_SLOT*, NC_CMD_TYPE, atomic macros */
+
+#include "kron_axis.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*===========================================================================
- * ENUMERATIONS
- *===========================================================================*/
-
-typedef enum {
-    mcAborting         = 0,
-    mcBuffered         = 1,
-    mcBlendingLow      = 2,
-    mcBlendingPrevious = 3,
-    mcBlendingNext     = 4,
-    mcBlendingHigh     = 5
-} MC_BUFFER_MODE;
-
-typedef enum {
-    mcPositiveDirection = 1,
-    mcShortestWay       = 2,
-    mcNegativeDirection = 3,
-    mcCurrentDirection  = 4
-} MC_DIRECTION;
-
-typedef enum {
-    mcImmediately = 0,
-    mcQueued      = 1
-} MC_EXECUTION_MODE;
-
-typedef enum {
-    mcCommandedValue = 0,
-    mcSetValue       = 1,
-    mcActualValue    = 2
-} MC_SOURCE;
-
-typedef enum {
-    MC_AXIS_DISABLED            = 0,
-    MC_AXIS_STANDSTILL          = 1,
-    MC_AXIS_HOMING              = 2,
-    MC_AXIS_STOPPING            = 3,
-    MC_AXIS_DISCRETE_MOTION     = 4,
-    MC_AXIS_CONTINUOUS_MOTION   = 5,
-    MC_AXIS_SYNCHRONIZED_MOTION = 6,
-    MC_AXIS_ERRORSTOP           = 7
-} MC_AXIS_STATE;
-
-/*===========================================================================
- * AXIS_REF — Axis Reference (Bridge between Slow Task FBs and NC Engine)
+ * Shared FB private state
  *
- * Memory layout is split into three clear sections:
- *   1. Identity & link      — set once at init
- *   2. Command channel      — written by Slow Task, read by Fast Task
- *   3. Status channel       — written by Fast Task, read by Slow Task
- *
- * Slow Task MUST NOT write to sts_* fields.
- * Fast Task MUST NOT write to cmd_* fields.
- * Shared read-only fields (ActualPosition, etc.) are written by Fast Task only.
+ * Every Execute-driven FB carries one of these.  It holds the request the axis
+ * writes its result into, plus the edge detection and the guarantee that a
+ * terminal output is visible for at least one cycle (2.4.1, 'Output status').
  *===========================================================================*/
 typedef struct {
-
-    /* ── 1. Identity & Hardware Link ────────────────────────────────────── */
-    uint16_t          AxisNo;           /* Axis identifier (0-based)          */
-    KRON_SERVO_SLOT  *slot;             /* Pointer into Kron_PI.servo[n]      */
-                                        /* Set by generated plc.c at startup. */
-                                        /* NULL in simulation mode.           */
-    bool              Simulation;       /* TRUE: NC engine runs without hw    */
-
-    /* ── Override factors (written by MC_SetOverride, read by NC engine) ── */
-    float             VelFactor;        /* Velocity override  [0.0 .. 1.0]    */
-    float             AccFactor;        /* Acc/dec override   [0.0 .. 1.0]    */
-    float             JerkFactor;       /* Jerk override      [0.0 .. 1.0]    */
-
-    /* ── Convenience actual values (written by NC each fast cycle) ──────── */
-    /* Read by MC_ReadActualPosition, MC_ReadActualVelocity, etc.            */
-    float             ActualPosition;   /* [u]                                */
-    float             ActualVelocity;   /* [u/s], signed                      */
-    float             ActualTorque;     /* [%rated], signed                   */
-
-    /* ── Profile generator setpoints (written by NC each fast cycle) ────── */
-    float             CommandedPosition;
-    float             CommandedVelocity;
-
-    /* ── Axis scaling metadata (configured at startup, informational) ───── */
-    float             GearRatio;         /* User units per motor rev (e.g. 5 = 1 rev → 5 mm) */
-    KRON_ENCODER_TYPE EncoderType;       /* Feedback encoder type             */
-
-    /* ── Power state (written synchronously by MC_Power in Slow Task) ──── */
-    bool              PowerEnabled;       /* MC_Power sets this = Enable each cycle.
-                                           * Motion FBs check before ContinuousUpdate
-                                           * to avoid overwriting a pending POWER_OFF. */
-
-    /* ── Axis-level status (written by NC) ──────────────────────────────── */
-    bool              IsHomed;
-    bool              AxisWarning;
-    uint16_t          AxisErrorID;
-
-    /* ─────────────────────────────────────────────────────────────────────
-     * COMMAND CHANNEL   (Slow Task writes → NC Engine reads)
-     *
-     * Protocol:
-     *   1. Write all cmd_* param fields.
-     *   2. KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u)  ← publish (RELEASE barrier)
-     *
-     * NC Engine detects new command when cmd_Seq != sts_AckSeq.
-     * ───────────────────────────────────────────────────────────────────── */
-    volatile uint16_t cmd_Seq;          /* Incremented by Slow Task to publish */
-    NC_CMD_TYPE       cmd_Cmd;          /* Command type                        */
-    float             cmd_TargetPos;    /* NC_CMD_MOVE_ABS / MOVE_REL / HOME   */
-    float             cmd_TargetVel;    /* Maximum velocity [u/s]              */
-    float             cmd_Accel;        /* Acceleration [u/s^2]                */
-    float             cmd_Decel;        /* Deceleration [u/s^2]                */
-    float             cmd_Jerk;         /* Jerk [u/s^3], 0 = trapezoidal      */
-    float             cmd_HomePos;      /* Position set at home signal         */
-
-    /* ─────────────────────────────────────────────────────────────────────
-     * STATUS CHANNEL    (NC Engine writes → Slow Task reads)
-     *
-     * NC Engine:
-     *   1. Latch cmd_* params internally.
-     *   2. KRON_STORE_REL_U16(&axis->sts_AckSeq, latched_seq) ← acknowledge
-     *   3. Update sts_Busy / sts_Done / sts_Error each fast cycle.
-     *   4. Write sts_State each fast cycle (PLCopen state machine).
-     *
-     * Slow Task FBs read sts_* to report Busy/Done/Error/State.
-     * ───────────────────────────────────────────────────────────────────── */
-    volatile uint16_t sts_AckSeq;       /* Echo of cmd_Seq when NC latches cmd */
-    volatile MC_AXIS_STATE sts_State;   /* PLCopen state, authoritative copy   */
-    bool              sts_Busy;
-    bool              sts_Done;
-    bool              sts_Error;
-    bool              sts_CommandAborted;
-    uint16_t          sts_ErrorID;
-
-    /* ── Drive diagnostics (written by NC each fast cycle, read-only) ──────── */
-    /* Raw CiA402 statusword / controlword from the servo drive's PDO.          */
-    uint16_t          drv_StatusWord;   /* 0x6041 — last received from drive  */
-    uint16_t          drv_ControlWord;  /* 0x6040 — last sent to drive        */
-
-    /* ── MC_Stop lock (PLCopen: non-abortable, axis locked while Execute) ── */
-    /* Written by MC_Stop_Call in Slow Task only.  While true the NC engine  */
-    /* holds the axis in MC_AXIS_STOPPING even after deceleration completes, */
-    /* and all other motion FBs refuse to start.                             */
-    bool              StopActive;
-
-    /* ── Slow-Task-only: abort coordination between concurrent FBs ───────── */
-    /* When a new FB takes control it increments _ActiveToken.               */
-    /* Each FB stores its own token at Execute↑ in _myToken (FB-private).   */
-    /* If _myToken != _ActiveToken the FB was preempted → CommandAborted.   */
-    uint16_t          _ActiveToken;
-
-} AXIS_REF;
+    KRON_MOTION_REQ req;
+    bool            prevExecute;
+    bool            terminalShown;
+} MC_FB_PRIVATE;
 
 /*===========================================================================
- * AXIS_REF helpers
- *===========================================================================*/
-void AXIS_REF_Init(AXIS_REF *axis, uint16_t axisNo, KRON_SERVO_SLOT *slot);
-
-/* Inline used by FBs: publish a new command to the NC engine */
-static inline void _axis_publish_cmd(AXIS_REF *axis, NC_CMD_TYPE cmd,
-                                     float tgt, float vel,
-                                     float acc, float dec, float jerk)
-{
-    axis->cmd_Cmd       = cmd;
-    axis->cmd_TargetPos = tgt;
-    axis->cmd_TargetVel = vel * axis->VelFactor;
-    axis->cmd_Accel     = acc * axis->AccFactor;
-    axis->cmd_Decel     = dec * axis->AccFactor;
-    axis->cmd_Jerk      = jerk * axis->JerkFactor;
-    KRON_FETCH_ADD_U16(&axis->cmd_Seq, 1u);   /* RELEASE barrier — publish */
-}
-
-/* Inline used by FBs: take exclusive axis control (abort other FBs) */
-static inline uint16_t _axis_take_token(AXIS_REF *axis) {
-    return ++axis->_ActiveToken;
-}
-
-/* Inline used by FBs: check if another FB has taken control */
-static inline bool _axis_token_aborted(const AXIS_REF *axis, uint16_t my_token) {
-    return my_token != axis->_ActiveToken;
-}
-
-/*===========================================================================
- * 3.1  MC_Power
+ * 3.1  MC_Power — control the power stage
  *===========================================================================*/
 typedef struct {
-    bool     Enable;
-    bool     EnablePositive;
-    bool     EnableNegative;
-
-    bool     Status;
-    bool     Valid;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevEnable;
+    /* VAR_INPUT */
+    bool     Enable;            /* B */
+    bool     EnablePositive;    /* E */
+    bool     EnableNegative;    /* E */
+    /* VAR_OUTPUT */
+    bool     Status;            /* B  effective state of the power stage */
+    bool     Valid;             /* E */
+    bool     Error;             /* B */
+    uint16_t ErrorID;           /* E */
 } MC_Power;
 
 void MC_Power_Call(MC_Power *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.2  MC_Home
+ * 3.2  MC_Home — search home sequence
  *===========================================================================*/
 typedef struct {
-    bool           Execute;
-    float          Position;
-    MC_BUFFER_MODE BufferMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    uint16_t _myToken;
+    /* VAR_INPUT */
+    bool           Execute;         /* B */
+    double         Position;        /* B  absolute position at the reference signal [u] */
+    MC_BUFFER_MODE BufferMode;      /* E */
+    /* VAR_OUTPUT */
+    bool           Done;            /* B */
+    bool           Busy;            /* E */
+    bool           Active;          /* E */
+    bool           CommandAborted;  /* E */
+    bool           Error;           /* B */
+    uint16_t       ErrorID;         /* E */
+    /* private */
+    MC_FB_PRIVATE  _p;
 } MC_Home;
 
 void MC_Home_Call(MC_Home *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.3  MC_Stop
+ * 3.3  MC_Stop — controlled stop, axis to 'Stopping', nothing else allowed
  *===========================================================================*/
 typedef struct {
-    bool     Execute;
-    float    Deceleration;
-    float    Jerk;
-
-    bool     Done;
-    bool     Busy;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
+    /* VAR_INPUT */
+    bool          Execute;          /* B */
+    double        Deceleration;     /* E [u/s^2] */
+    double        Jerk;             /* E [u/s^3] */
+    /* VAR_OUTPUT */
+    bool          Done;             /* B  zero velocity reached */
+    bool          Busy;             /* E */
+    bool          Active;           /* E  (Done and Active may both be set here) */
+    bool          CommandAborted;   /* E  only power-off can abort a stop */
+    bool          Error;            /* B */
+    uint16_t      ErrorID;          /* E */
+    /* private */
+    MC_FB_PRIVATE _p;
 } MC_Stop;
 
 void MC_Stop_Call(MC_Stop *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.4  MC_Halt
+ * 3.4  MC_Halt — controlled stop under normal conditions, abortable
  *===========================================================================*/
 typedef struct {
-    bool           Execute;
-    float          Deceleration;
-    float          Jerk;
-    MC_BUFFER_MODE BufferMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    uint16_t _myToken;
+    /* VAR_INPUT */
+    bool           Execute;         /* B */
+    double         Deceleration;    /* E */
+    double         Jerk;            /* E */
+    MC_BUFFER_MODE BufferMode;      /* E */
+    /* VAR_OUTPUT */
+    bool           Done;            /* B */
+    bool           Busy;            /* E */
+    bool           Active;          /* E */
+    bool           CommandAborted;  /* E */
+    bool           Error;           /* B */
+    uint16_t       ErrorID;         /* E */
+    /* private */
+    MC_FB_PRIVATE  _p;
 } MC_Halt;
 
 void MC_Halt_Call(MC_Halt *inst, AXIS_REF *axis);
@@ -286,25 +129,25 @@ void MC_Halt_Call(MC_Halt *inst, AXIS_REF *axis);
  * 3.5  MC_MoveAbsolute
  *===========================================================================*/
 typedef struct {
-    bool           Execute;
-    bool           ContinuousUpdate;
-    float          Position;
-    float          Velocity;
-    float          Acceleration;
-    float          Deceleration;
-    float          Jerk;
-    MC_DIRECTION   Direction;
-    MC_BUFFER_MODE BufferMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    uint16_t _myToken;
+    /* VAR_INPUT */
+    bool           Execute;         /* B */
+    bool           ContinuousUpdate;/* E */
+    double         Position;        /* B [u] */
+    double         Velocity;        /* B [u/s] maximum, not necessarily reached */
+    double         Acceleration;    /* E [u/s^2] */
+    double         Deceleration;    /* E [u/s^2] */
+    double         Jerk;            /* E [u/s^3] */
+    MC_DIRECTION   Direction;       /* B  ignored on a linear axis (3.5 note 2) */
+    MC_BUFFER_MODE BufferMode;      /* E */
+    /* VAR_OUTPUT */
+    bool           Done;            /* B */
+    bool           Busy;            /* E */
+    bool           Active;          /* E */
+    bool           CommandAborted;  /* E */
+    bool           Error;           /* B */
+    uint16_t       ErrorID;         /* E */
+    /* private */
+    MC_FB_PRIVATE  _p;
 } MC_MoveAbsolute;
 
 void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis);
@@ -313,349 +156,286 @@ void MC_MoveAbsolute_Call(MC_MoveAbsolute *inst, AXIS_REF *axis);
  * 3.6  MC_MoveRelative
  *===========================================================================*/
 typedef struct {
+    /* VAR_INPUT */
     bool           Execute;
     bool           ContinuousUpdate;
-    float          Distance;
-    float          Velocity;
-    float          Acceleration;
-    float          Deceleration;
-    float          Jerk;
+    double         Distance;        /* B [u] relative to the set position at start */
+    double         Velocity;
+    double         Acceleration;
+    double         Deceleration;
+    double         Jerk;
     MC_BUFFER_MODE BufferMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    float    _targetPosition;
-    uint16_t _myToken;
+    /* VAR_OUTPUT */
+    bool           Done;
+    bool           Busy;
+    bool           Active;
+    bool           CommandAborted;
+    bool           Error;
+    uint16_t       ErrorID;
+    /* private */
+    MC_FB_PRIVATE  _p;
 } MC_MoveRelative;
 
 void MC_MoveRelative_Call(MC_MoveRelative *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.7  MC_MoveAdditive
+ * 3.7  MC_MoveAdditive — relative to the most recent commanded position
  *===========================================================================*/
 typedef struct {
+    /* VAR_INPUT */
     bool           Execute;
     bool           ContinuousUpdate;
-    float          Distance;
-    float          Velocity;
-    float          Acceleration;
-    float          Deceleration;
-    float          Jerk;
+    double         Distance;
+    double         Velocity;
+    double         Acceleration;
+    double         Deceleration;
+    double         Jerk;
     MC_BUFFER_MODE BufferMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    float    _targetPosition;
-    uint16_t _myToken;
+    /* VAR_OUTPUT */
+    bool           Done;
+    bool           Busy;
+    bool           Active;
+    bool           CommandAborted;
+    bool           Error;
+    uint16_t       ErrorID;
+    /* private */
+    MC_FB_PRIVATE  _p;
 } MC_MoveAdditive;
 
 void MC_MoveAdditive_Call(MC_MoveAdditive *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.8  MC_MoveSuperimposed
+ * 3.8  MC_MoveSuperimposed — an extra distance on top of the running motion
  *===========================================================================*/
 typedef struct {
-    bool     Execute;
-    bool     ContinuousUpdate;
-    float    Distance;
-    float    VelocityDiff;
-    float    Acceleration;
-    float    Deceleration;
-    float    Jerk;
-
-    bool     Done;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-    float    CoveredDistance;
-
-    bool     _prevExecute;
-    float    _coveredSoFar;
-    uint16_t _myToken;
+    /* VAR_INPUT */
+    bool          Execute;
+    bool          ContinuousUpdate;
+    double        Distance;         /* B [u] superimposed on the ongoing motion */
+    double        VelocityDiff;     /* E [u/s] velocity difference of the extra motion */
+    double        Acceleration;
+    double        Deceleration;
+    double        Jerk;
+    /* VAR_OUTPUT */
+    bool          Done;
+    bool          Busy;
+    bool          Active;
+    bool          CommandAborted;
+    bool          Error;
+    uint16_t      ErrorID;
+    double        CoveredDistance;  /* E [u] contributed by this FB so far */
+    /* private */
+    MC_FB_PRIVATE _p;
 } MC_MoveSuperimposed;
 
 void MC_MoveSuperimposed_Call(MC_MoveSuperimposed *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.9  MC_HaltSuperimposed
+ * 3.9  MC_HaltSuperimposed — stop the superimposed motion only
  *===========================================================================*/
 typedef struct {
-    bool     Execute;
-    float    Deceleration;
-    float    Jerk;
-
-    bool     Done;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    uint16_t _myToken;
+    /* VAR_INPUT */
+    bool          Execute;
+    double        Deceleration;
+    double        Jerk;
+    /* VAR_OUTPUT */
+    bool          Done;
+    bool          Busy;
+    bool          Active;
+    bool          CommandAborted;
+    bool          Error;
+    uint16_t      ErrorID;
+    /* private */
+    MC_FB_PRIVATE _p;
 } MC_HaltSuperimposed;
 
 void MC_HaltSuperimposed_Call(MC_HaltSuperimposed *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.10  MC_MoveVelocity
+ * 3.10  MC_MoveVelocity — never ending motion at a velocity
  *===========================================================================*/
 typedef struct {
+    /* VAR_INPUT */
     bool           Execute;
     bool           ContinuousUpdate;
-    float          Velocity;
-    float          Acceleration;
-    float          Deceleration;
-    float          Jerk;
-    MC_DIRECTION   Direction;
+    double         Velocity;        /* B [u/s] signed */
+    double         Acceleration;
+    double         Deceleration;
+    double         Jerk;
+    MC_DIRECTION   Direction;       /* E  negative velocity * negative direction = positive */
     MC_BUFFER_MODE BufferMode;
-
-    bool     InVelocity;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    uint16_t _myToken;
+    /* VAR_OUTPUT */
+    bool           InVelocity;      /* B  commanded velocity reached */
+    bool           Busy;
+    bool           Active;
+    bool           CommandAborted;
+    bool           Error;
+    uint16_t       ErrorID;
+    /* private */
+    MC_FB_PRIVATE  _p;
 } MC_MoveVelocity;
 
 void MC_MoveVelocity_Call(MC_MoveVelocity *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.11  MC_MoveContinuousAbsolute
+ * 3.17  MC_SetPosition — shift the coordinate system, no movement caused
  *===========================================================================*/
 typedef struct {
-    bool           Execute;
-    bool           ContinuousUpdate;
-    float          Position;
-    float          EndVelocity;
-    float          Velocity;
-    float          Acceleration;
-    float          Deceleration;
-    float          Jerk;
-    MC_DIRECTION   Direction;
-    MC_BUFFER_MODE BufferMode;
-
-    bool     InEndVelocity;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    uint16_t _myToken;
-} MC_MoveContinuousAbsolute;
-
-void MC_MoveContinuousAbsolute_Call(MC_MoveContinuousAbsolute *inst, AXIS_REF *axis);
-
-/*===========================================================================
- * 3.12  MC_MoveContinuousRelative
- *===========================================================================*/
-typedef struct {
-    bool           Execute;
-    bool           ContinuousUpdate;
-    float          Distance;
-    float          EndVelocity;
-    float          Velocity;
-    float          Acceleration;
-    float          Deceleration;
-    float          Jerk;
-    MC_BUFFER_MODE BufferMode;
-
-    bool     InEndVelocity;
-    bool     Busy;
-    bool     Active;
-    bool     CommandAborted;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
-    float    _targetPosition;
-    uint16_t _myToken;
-} MC_MoveContinuousRelative;
-
-void MC_MoveContinuousRelative_Call(MC_MoveContinuousRelative *inst, AXIS_REF *axis);
-
-/*===========================================================================
- * 3.17  MC_SetPosition
- *===========================================================================*/
-typedef struct {
+    /* VAR_INPUT */
     bool              Execute;
-    float             Position;
-    bool              Relative;
-    MC_EXECUTION_MODE ExecutionMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
+    double            Position;     /* B [u] (a distance when Relative) */
+    bool              Relative;     /* E */
+    MC_EXECUTION_MODE ExecutionMode;/* E */
+    /* VAR_OUTPUT */
+    bool              Done;
+    bool              Busy;
+    bool              Error;
+    uint16_t          ErrorID;
+    /* private */
+    bool              _prevExecute;
 } MC_SetPosition;
 
 void MC_SetPosition_Call(MC_SetPosition *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.18  MC_SetOverride
+ * 3.18  MC_SetOverride — velocity / acceleration / jerk factors
  *===========================================================================*/
 typedef struct {
+    /* VAR_INPUT */
     bool     Enable;
-    float    VelFactor;
-    float    AccFactor;
-    float    JerkFactor;
-
+    double   VelFactor;             /* B  0.0 .. 1.0 */
+    double   AccFactor;             /* E  > 0.0       */
+    double   JerkFactor;            /* E  > 0.0       */
+    /* VAR_OUTPUT */
     bool     Enabled;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
-
-    bool     _prevEnable;
 } MC_SetOverride;
 
 void MC_SetOverride_Call(MC_SetOverride *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.19  MC_ReadParameter / MC_ReadBoolParameter
+ * 3.19 / 3.20  MC_ReadParameter, MC_WriteParameter and the boolean versions
+ *
+ * Parameter numbers follow Table 5.  Numbers above 999 are vendor specific.
  *===========================================================================*/
+#define MC_PARAM_COMMANDED_POSITION      1
+#define MC_PARAM_SW_LIMIT_POS            2
+#define MC_PARAM_SW_LIMIT_NEG            3
+#define MC_PARAM_ENABLE_LIMIT_POS        4
+#define MC_PARAM_ENABLE_LIMIT_NEG        5
+#define MC_PARAM_ENABLE_POS_LAG_MON      6
+#define MC_PARAM_MAX_POSITION_LAG        7
+#define MC_PARAM_MAX_VELOCITY_SYSTEM     8
+#define MC_PARAM_MAX_VELOCITY_APPL       9
+#define MC_PARAM_ACTUAL_VELOCITY        10
+#define MC_PARAM_COMMANDED_VELOCITY     11
+#define MC_PARAM_MAX_ACCELERATION_SYS   12
+#define MC_PARAM_MAX_ACCELERATION_APPL  13
+#define MC_PARAM_MAX_DECELERATION_SYS   14
+#define MC_PARAM_MAX_DECELERATION_APPL  15
+#define MC_PARAM_MAX_JERK_SYSTEM        16
+#define MC_PARAM_MAX_JERK_APPL          17
+/* vendor specific */
+#define MC_PARAM_IN_POSITION_WINDOW   1000
+#define MC_PARAM_IN_VELOCITY_WINDOW   1001
+#define MC_PARAM_GEAR_RATIO           1002
+#define MC_PARAM_ACTUAL_TORQUE        1003
+
 typedef struct {
     bool     Enable;
-    int16_t  ParameterNumber;
-
+    int32_t  ParameterNumber;
     bool     Valid;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
-    float    Value;
-
-    bool     _prevEnable;
+    double   Value;
 } MC_ReadParameter;
 
 void MC_ReadParameter_Call(MC_ReadParameter *inst, AXIS_REF *axis);
 
 typedef struct {
     bool     Enable;
-    int16_t  ParameterNumber;
-
+    int32_t  ParameterNumber;
     bool     Valid;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
     bool     Value;
-
-    bool     _prevEnable;
 } MC_ReadBoolParameter;
 
 void MC_ReadBoolParameter_Call(MC_ReadBoolParameter *inst, AXIS_REF *axis);
 
-/*===========================================================================
- * 3.20  MC_WriteParameter / MC_WriteBoolParameter
- *===========================================================================*/
 typedef struct {
     bool              Execute;
-    int16_t           ParameterNumber;
-    float             Value;
+    int32_t           ParameterNumber;
+    double            Value;
     MC_EXECUTION_MODE ExecutionMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
+    bool              Done;
+    bool              Busy;
+    bool              Error;
+    uint16_t          ErrorID;
+    bool              _prevExecute;
 } MC_WriteParameter;
 
 void MC_WriteParameter_Call(MC_WriteParameter *inst, AXIS_REF *axis);
 
 typedef struct {
     bool              Execute;
-    int16_t           ParameterNumber;
+    int32_t           ParameterNumber;
     bool              Value;
     MC_EXECUTION_MODE ExecutionMode;
-
-    bool     Done;
-    bool     Busy;
-    bool     Error;
-    uint16_t ErrorID;
-
-    bool     _prevExecute;
+    bool              Done;
+    bool              Busy;
+    bool              Error;
+    uint16_t          ErrorID;
+    bool              _prevExecute;
 } MC_WriteBoolParameter;
 
 void MC_WriteBoolParameter_Call(MC_WriteBoolParameter *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.24  MC_ReadActualPosition
+ * 3.24 - 3.26  MC_ReadActualPosition / Velocity / Torque
  *===========================================================================*/
 typedef struct {
     bool     Enable;
-
     bool     Valid;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
-    float    Position;
-
-    bool     _prevEnable;
+    double   Position;
 } MC_ReadActualPosition;
 
 void MC_ReadActualPosition_Call(MC_ReadActualPosition *inst, AXIS_REF *axis);
 
-/*===========================================================================
- * 3.25  MC_ReadActualVelocity
- *===========================================================================*/
 typedef struct {
     bool     Enable;
-
     bool     Valid;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
-    float    Velocity;
-
-    bool     _prevEnable;
+    double   Velocity;
 } MC_ReadActualVelocity;
 
 void MC_ReadActualVelocity_Call(MC_ReadActualVelocity *inst, AXIS_REF *axis);
 
-/*===========================================================================
- * 3.26  MC_ReadActualTorque
- *===========================================================================*/
 typedef struct {
     bool     Enable;
-
     bool     Valid;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
-    float    Torque;
-
-    bool     _prevEnable;
+    double   Torque;
 } MC_ReadActualTorque;
 
 void MC_ReadActualTorque_Call(MC_ReadActualTorque *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.27  MC_ReadStatus
+ * 3.27  MC_ReadStatus — the state diagram, as booleans
  *===========================================================================*/
 typedef struct {
     bool     Enable;
-
     bool     Valid;
     bool     Busy;
     bool     Error;
@@ -668,8 +448,6 @@ typedef struct {
     bool     DiscreteMotion;
     bool     ContinuousMotion;
     bool     SynchronizedMotion;
-
-    bool     _prevEnable;
 } MC_ReadStatus;
 
 void MC_ReadStatus_Call(MC_ReadStatus *inst, AXIS_REF *axis);
@@ -680,19 +458,15 @@ void MC_ReadStatus_Call(MC_ReadStatus *inst, AXIS_REF *axis);
 typedef struct {
     bool      Enable;
     MC_SOURCE Source;
-
-    bool     Valid;
-    bool     Busy;
-    bool     Error;
-    uint16_t ErrorID;
-    bool     ConstantVelocity;
-    bool     Accelerating;
-    bool     Decelerating;
-    bool     DirectionPositive;
-    bool     DirectionNegative;
-
-    bool     _prevEnable;
-    float    _prevVelocity;
+    bool      Valid;
+    bool      Busy;
+    bool      Error;
+    uint16_t  ErrorID;
+    bool      ConstantVelocity;
+    bool      Accelerating;
+    bool      Decelerating;
+    bool      DirectionPositive;
+    bool      DirectionNegative;
 } MC_ReadMotionState;
 
 void MC_ReadMotionState_Call(MC_ReadMotionState *inst, AXIS_REF *axis);
@@ -702,7 +476,6 @@ void MC_ReadMotionState_Call(MC_ReadMotionState *inst, AXIS_REF *axis);
  *===========================================================================*/
 typedef struct {
     bool     Enable;
-
     bool     Valid;
     bool     Busy;
     bool     Error;
@@ -716,8 +489,10 @@ typedef struct {
     bool     PowerOn;
     bool     IsHomed;
     bool     AxisWarning;
-
-    bool     _prevEnable;
+    /* the digital inputs the axis watches, index into Kron_PI.di, -1 = none */
+    int16_t  HomeSwitchInput;
+    int16_t  LimitSwitchPosInput;
+    int16_t  LimitSwitchNegInput;
 } MC_ReadAxisInfo;
 
 void MC_ReadAxisInfo_Call(MC_ReadAxisInfo *inst, AXIS_REF *axis);
@@ -727,32 +502,32 @@ void MC_ReadAxisInfo_Call(MC_ReadAxisInfo *inst, AXIS_REF *axis);
  *===========================================================================*/
 typedef struct {
     bool     Enable;
-
     bool     Valid;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
     uint16_t AxisErrorID;
-
-    bool     _prevEnable;
 } MC_ReadAxisError;
 
 void MC_ReadAxisError_Call(MC_ReadAxisError *inst, AXIS_REF *axis);
 
 /*===========================================================================
- * 3.31  MC_Reset
+ * 3.31  MC_Reset — 'ErrorStop' to 'Standstill' or 'Disabled'
  *===========================================================================*/
 typedef struct {
     bool     Execute;
-
     bool     Done;
     bool     Busy;
     bool     Error;
     uint16_t ErrorID;
-
     bool     _prevExecute;
+    bool     _terminalShown;
 } MC_Reset;
 
 void MC_Reset_Call(MC_Reset *inst, AXIS_REF *axis);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* KRONMOTION_H */
